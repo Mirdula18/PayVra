@@ -1,0 +1,60 @@
+"""APScheduler setup and the /health snapshot.
+
+BackgroundScheduler runs in-process alongside FastAPI, with job state persisted in Postgres via
+``SQLAlchemyJobStore`` so per-invoice follow-ups survive a container restart (ADR-007).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.schedulers.background import BackgroundScheduler
+
+from app.clock import IST, now_utc
+from app.config import settings
+from app.db import engine
+from app.scheduler.state import SchedulerState
+
+HEARTBEAT_JOB_ID = "heartbeat"
+
+
+def build_scheduler() -> BackgroundScheduler:
+    """Construct a scheduler backed by the Postgres job store."""
+    jobstores = {"default": SQLAlchemyJobStore(engine=engine)}
+    return BackgroundScheduler(
+        jobstores=jobstores,
+        timezone=IST,
+        job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 60},
+    )
+
+
+def register_jobs(scheduler: BackgroundScheduler) -> None:
+    """Register Phase 0 jobs. Idempotent: ``replace_existing`` avoids duplicates on restart."""
+    scheduler.add_job(
+        "app.scheduler.jobs:heartbeat",
+        trigger="interval",
+        seconds=settings.scheduler_heartbeat_seconds,
+        id=HEARTBEAT_JOB_ID,
+        replace_existing=True,
+        # Fire once at startup so liveness is observable immediately, not one interval later.
+        next_run_time=now_utc(),
+    )
+
+
+def health_snapshot(scheduler: BackgroundScheduler) -> dict[str, Any]:
+    """Scheduler status for ``GET /health``.
+
+    Distinguishes *started* (``running``) from *actually executing* (``last_heartbeat_at``), and
+    reports how many jobs are registered and when the next one fires.
+    """
+    jobs = scheduler.get_jobs()
+    next_runs = [job.next_run_time for job in jobs if job.next_run_time is not None]
+    next_dispatch: datetime | None = min(next_runs) if next_runs else None
+    return {
+        "running": scheduler.running,
+        "jobs_registered": len(jobs),
+        "last_heartbeat_at": SchedulerState.last_heartbeat_at,
+        "next_dispatch": next_dispatch,
+    }
