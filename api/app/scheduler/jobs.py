@@ -1,6 +1,6 @@
 """Scheduled job callables.
 
-Phase 1 ships the heartbeat and ``refresh_aging``. Later phases add ``rescore_worklist``,
+Phase 2 ships the heartbeat, ``refresh_aging`` and ``rescore_worklist``. Later phases add
 ``plan_day``, ``dispatch_window``, ``promise_sweep``, ``link_hygiene``, and ``digest`` as plain
 callables taking ``merchant_id`` (ADR-007 keeps them Celery-portable). Do not add framework
 decorators here.
@@ -73,3 +73,43 @@ def refresh_aging_all() -> None:
             refresh_aging(merchant_id)
         except Exception:
             logger.exception("refresh_aging failed for merchant=%s", merchant_id)
+
+
+def rescore_worklist(merchant_id: uuid.UUID) -> None:
+    """Recompute collectability, priority and the reason string for one merchant (FR-4.4).
+
+    **Idempotent.** An invoice whose score, priority and reason are all unchanged is skipped, so
+    a second run in the same night updates nothing and writes no audit entry. That matters twice
+    over: it keeps the job safe to retry, and it keeps the ADR-008 training set free of duplicate
+    observations of a state that never changed.
+
+    Runs after ``refresh_aging``, because days_past_due is a scoring input and scoring yesterday's
+    ageing would be quietly wrong every morning.
+    """
+    from app.scoring.worklist import rescore
+
+    db = SessionLocal()
+    try:
+        changed = rescore(db, merchant_id)
+        db.commit()
+        logger.info("rescore_worklist merchant=%s rows_changed=%d", merchant_id, changed)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def rescore_worklist_all() -> None:
+    """Fan out :func:`rescore_worklist` across every merchant. This is what the 01:00 job runs."""
+    db = SessionLocal()
+    try:
+        merchant_ids = list(db.execute(select(Merchant.id)).scalars())
+    finally:
+        db.close()
+
+    for merchant_id in merchant_ids:
+        try:
+            rescore_worklist(merchant_id)
+        except Exception:
+            logger.exception("rescore_worklist failed for merchant=%s", merchant_id)
