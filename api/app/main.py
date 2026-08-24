@@ -1,6 +1,7 @@
 """FastAPI application entrypoint.
 
-Phase 1 exposes ``GET /health`` and the ingestion endpoints under ``/api/v1``. The lifespan starts
+Phase 2 exposes ``GET /health`` plus the ingestion and worklist endpoints under ``/api/v1``.
+The lifespan starts
 the in-process APScheduler so a running process always has a live scheduler (ADR-007), and
 ``/health`` reports its status.
 
@@ -28,7 +29,7 @@ from app.exceptions import (
     PayvraError,
     ValidationError,
 )
-from app.routers import batches
+from app.routers import batches, worklist
 from app.scheduler.registry import build_scheduler, health_snapshot, register_jobs
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="PAYVRA API", version="0.1.0", lifespan=lifespan)
 app.include_router(batches.router, prefix=API_PREFIX)
+app.include_router(worklist.router, prefix=API_PREFIX)
 
 
 def _envelope(code: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:

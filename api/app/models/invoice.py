@@ -72,6 +72,11 @@ class Invoice(Base):
     stop_reason: Mapped[str | None] = enum_column(nullable=True)
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # FR-4.5 merchant overrides. Excluding is not here: it uses recovery_state='stopped' with
+    # stop_reason='merchant_excluded', which the enums already carry.
+    is_pinned: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
+    snoozed_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+
     created_at: Mapped[datetime] = created_at_col()
     updated_at: Mapped[datetime] = updated_at_col()
 
@@ -88,4 +93,7 @@ class Invoice(Base):
             "recovery_state",
             text("priority_score DESC"),
         ),
+        # Pinned rows are fetched separately from the ranked scan; partial so it indexes only
+        # the handful of rows a merchant has actually pinned.
+        Index("idx_worklist_pinned", "merchant_id", postgresql_where=text("is_pinned")),
     )
