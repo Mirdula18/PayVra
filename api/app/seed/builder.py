@@ -130,7 +130,10 @@ def _fake_gstin(rng: random.Random) -> str:
         + "".join(rng.choice(digits) for _ in range(4))
         + rng.choice(letters)
     )
-    return f"{state}{pan}{rng.choice(digits)}Z{rng.choice(letters + digits)}"
+    # 13th char is the entity code: 1-9 then A-Z. '0' is not valid, and emitting it produced
+    # GSTINs that Phase 1's validator (correctly) rejects -- 21 of the 34 seeded counterparties.
+    entity = rng.choice("123456789" + letters)
+    return f"{state}{pan}{entity}Z{rng.choice(letters + digits)}"
 
 
 def _mobile(i: int) -> str:
@@ -437,15 +440,46 @@ class SeedBuilder:
             inv.recovery_state = RecoveryState.PROMISED.value
 
         # 4 crossing the MSME Act 45-day threshold, on is_msme counterparties.
+        #
+        # Achieved by shaping the *pool*, not by flagging a subset of it. crosses_msme_45 is a
+        # derived fact -- FR-3.3 says every is_msme invoice past 45 days is flagged -- so
+        # rng.sample()-ing 4 of 8 eligible invoices produced a figure that scoring/aging.py's
+        # deterministic refresh legitimately overwrote (4 -> 8) on its first nightly run.
+        #
+        # Instead, pull the excess invoices back to just inside the threshold. Only ones sitting
+        # in the 31-60 bucket are moved, and only into 31-45, so the bucket stays the same and
+        # the 40/22/18/12/8 aging distribution is untouched. issue_date shifts with due_date so
+        # terms_days is preserved too.
+        MSME_TARGET = 45
         msme_pool = [
             inv
             for inv in self.invoices
             if self.cp_by_name_lookup(inv.counterparty_id).is_msme
-            and inv.days_past_due > 45
+            and inv.days_past_due > MSME_TARGET
             and inv.payment_status != PaymentStatus.PAID.value
         ]
-        for inv in self.rng.sample(msme_pool, 4):
-            inv.crosses_msme_45 = True
+        # Sorted by invoice_number so the choice of which to pull back is deterministic, and
+        # oldest-last so the deepest-aged invoices are the ones that keep the flag.
+        movable = sorted(
+            (inv for inv in msme_pool if inv.aging_bucket == "31-60"),
+            key=lambda i: i.invoice_number,
+        )
+        excess = len(msme_pool) - 4
+        for inv in movable[:excess]:
+            new_dpd = self.rng.randint(31, MSME_TARGET)
+            shift = timedelta(days=inv.days_past_due - new_dpd)
+            inv.due_date += shift
+            inv.issue_date += shift
+            inv.days_past_due = new_dpd
+            inv.aging_bucket = _bucket_of(new_dpd)
+
+        # Now the rule itself, applied deterministically to whatever the pool became.
+        for inv in self.invoices:
+            inv.crosses_msme_45 = (
+                self.cp_by_name_lookup(inv.counterparty_id).is_msme
+                and inv.days_past_due > MSME_TARGET
+                and inv.payment_status != PaymentStatus.PAID.value
+            )
 
         self.db.flush()
 
@@ -834,8 +868,13 @@ class SeedBuilder:
         """Emit the 8 deliberately defective raw rows for the Phase 1 repair queue.
 
         These are pre-normalisation upload rows that cannot exist as typed Invoice rows (missing
-        due date, unparseable amount, ambiguous date). They ship as an ingestion fixture, plus the
+        due date, unparseable amount, bad GSTIN). They ship as an ingestion fixture, plus the
         deliberate name variant so the fuzzy matcher is exercised. Not counted in the 120.
+
+        **Seven of the eight reach the repair queue**, not eight: INV-2026-9005 is ambiguous only
+        in isolation, and batch-level date detection legitimately resolves it from the days > 12
+        elsewhere in this same file. See agents/data-and-seed.md. The genuinely undecidable case
+        gets its own fixture -- :meth:`_write_ambiguous_dates_fixture`.
         """
         FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
         rows = [
@@ -904,6 +943,36 @@ class SeedBuilder:
             ],  # bad amount + gstin
         ]
         path = FIXTURES_DIR / "messy_upload.csv"
+        with path.open("w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerows(rows)
+
+        self._write_ambiguous_dates_fixture()
+
+    def _write_ambiguous_dates_fixture(self) -> None:
+        """Emit a file where the date format is genuinely undecidable.
+
+        Every day and month value is <= 12, so nothing anywhere in the file proves DD/MM or
+        MM/DD. Read one way ``05/03/2026`` is 5 March; read the other it is 3 May -- a two-month
+        swing in days_past_due, which would silently corrupt aging, the MSME 45-day flag and the
+        whole worklist.
+
+        agents/backend.md requires the **whole batch** to go to the repair queue in this case,
+        not a best guess and not a partial import. messy_upload.csv cannot exercise that: it
+        contains days > 12 that resolve it. Hence a separate fixture.
+
+        Every row is individually valid. The only defect is one the file cannot resolve about
+        itself, which is exactly the point.
+        """
+        rows = [
+            ["Invoice #", "Customer", "Amount", "Invoice Date", "Due Date", "GSTIN"],
+            ["INV-2026-9101", "Krishna Textiles", "245000", "05/03/2026", "04/04/2026", ""],
+            ["INV-2026-9102", "Anand Enterprises", "88000", "12/02/2026", "12/03/2026", ""],
+            ["INV-2026-9103", "Highland Ceramics", "410000", "03/04/2026", "03/05/2026", ""],
+            ["INV-2026-9104", "Nirmal Plastics", "156000", "01/02/2026", "01/03/2026", ""],
+            ["INV-2026-9105", "Venkatesh Electricals", "72000", "10/01/2026", "09/02/2026", ""],
+            ["INV-2026-9106", "Bombay Fasteners Pvt Ltd", "199000", "02/03/2026", "02/04/2026", ""],
+        ]
+        path = FIXTURES_DIR / "ambiguous_dates.csv"
         with path.open("w", newline="", encoding="utf-8") as fh:
             csv.writer(fh).writerows(rows)
 

@@ -83,9 +83,36 @@ and `Sundaram Auto Comp.` — so the fuzzy matcher demonstrably works.
   shared with `metrics_snapshots.dso_days` and (Phase 1) `GET /metrics`.
 - Aging buckets: roughly 40% current, 22% in 0–30, 18% in 31–60, 12% in 61–90, 8% at 90+
 - 6 invoices with partial payments already applied
-- 4 invoices crossing the MSME Act 45-day threshold, on `is_msme = true` counterparties
-- 8 rows with deliberate defects (missing due date, unparseable amount, ambiguous date format) so
-  the repair queue has something in it
+- 4 invoices crossing the MSME Act 45-day threshold, on `is_msme = true` counterparties.
+  **Achieved by shaping the pool, not by flagging a subset of it.**
+
+  > `crosses_msme_45` is a *derived* fact: FR-3.3 flags every `is_msme` invoice past 45 days, and
+  > `scoring/aging.py::refresh_aging` applies exactly that rule nightly. An earlier seed picked
+  > `rng.sample(pool, 4)` from 8 eligible invoices, so the first nightly refresh legitimately
+  > rewrote 4 → 8 and the seed's own printed figure went stale within a day.
+  >
+  > The seed now pulls the excess invoices back to just inside the threshold instead. Only ones
+  > already in the `31-60` bucket are moved, and only into 31–45 days, so the bucket is unchanged
+  > and the 40/22/18/12/8 aging distribution is untouched; `issue_date` shifts with `due_date`, so
+  > `terms_days` is preserved too. The flag is then computed from the rule, not sampled. Running
+  > `refresh_aging` on freshly seeded data now changes **zero** rows.
+- 8 rows with deliberate defects (missing due date, unparseable amount, malformed GSTIN,
+  impossible date, due-before-issue, negative amount) so the repair queue has something in it.
+  **Seven of the eight reach the repair queue, and that is correct.**
+
+  > `INV-2026-9005` (`03/04/2026` / `03/05/2026`) is ambiguous only *in isolation*. Batch-level
+  > date detection — which `agents/backend.md` mandates — resolves it from the days > 12 that
+  > appear elsewhere in the same file, so it imports cleanly. Flagging it anyway would mean
+  > ignoring the batch evidence, which is precisely the behaviour the spec forbids. Weakening the
+  > date rule to force an eighth repair row would trade a real correctness property for a round
+  > number. Expect `repair_queue: 7` from `messy_upload.csv`.
+
+- A second fixture, `ambiguous_dates.csv`, where the format is **genuinely** undecidable: every
+  day and month value is ≤ 12, so nothing anywhere in the file proves DD/MM or MM/DD. Every row
+  is individually valid; the only defect is one the file cannot resolve about itself. This is the
+  fixture that exercises the whole-batch rule — all rows to the repair queue with
+  `ambiguous_date_format`, and not one invoice created. `messy_upload.csv` cannot test this,
+  because its own days > 12 resolve it.
 
 ### History
 
