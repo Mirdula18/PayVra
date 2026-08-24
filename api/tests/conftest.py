@@ -81,7 +81,18 @@ def api_merchant(db_available: None) -> Iterator[uuid.UUID]:
         session.execute(
             text("DELETE FROM counterparties WHERE merchant_id = :m"), {"m": merchant_id}
         )
-        session.execute(text("DELETE FROM merchants WHERE id = :m"), {"m": merchant_id})
+        # The merchant row itself can only go if nothing scored it. audit_log has an FK to
+        # merchants and its DELETE is a silent no-op (migration 0001's append-only rules), so a
+        # merchant with audit entries is *permanently* undeletable -- by design. That is the
+        # guarantee working, not a leak: a tenant's compliance trail outliving the tenant is the
+        # entire point of an append-only log. Such merchants are left behind as an id plus their
+        # audit rows, with no invoices or counterparties attached.
+        has_audit = session.execute(
+            text("SELECT EXISTS (SELECT 1 FROM audit_log WHERE merchant_id = :m)"),
+            {"m": merchant_id},
+        ).scalar_one()
+        if not has_audit:
+            session.execute(text("DELETE FROM merchants WHERE id = :m"), {"m": merchant_id})
         session.commit()
     finally:
         session.close()
