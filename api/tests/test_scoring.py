@@ -12,7 +12,7 @@ import pytest
 
 from app.scoring import features as feat
 from app.scoring import model
-from app.scoring.worklist import build_reason, score_invoice
+from app.scoring.worklist import ClausePolarity, build_reason, reason_clauses, score_invoice
 
 
 def make_features(**overrides: object) -> feat.InvoiceFeatures:
@@ -320,3 +320,125 @@ def test_features_module_does_not_import_the_model() -> None:
 
     offenders = {name for name in imported if "scoring.model" in name or "scoring.worklist" in name}
     assert not offenders, f"features.py must not import {offenders}"
+
+
+# --- pre-due suppression (ADR-008 urgency) ---
+
+
+def test_pre_due_invoice_is_suppressed() -> None:
+    """A worklist ranks expected *incremental* recovery. An invoice that pays itself has none."""
+    overdue = score_invoice(make_features(raw_days_past_due=10))
+    pre_due = score_invoice(make_features(raw_days_past_due=-10))
+    assert pre_due.urgency == model.URGENCY_PRE_DUE
+    assert overdue.urgency == model.URGENCY_BASE
+    assert pre_due.priority < overdue.priority
+
+
+def test_pre_due_beats_the_msme_uplift() -> None:
+    """Inside terms is not yet a statutory-interest problem; the clock has not started."""
+    features = make_features(raw_days_past_due=-5, crosses_msme_45=True)
+    assert model.urgency_multiplier(features) == model.URGENCY_PRE_DUE
+
+
+def test_pre_due_beats_an_open_promise() -> None:
+    """Both say wait; the more fundamental fact is that nothing is overdue to chase."""
+    features = make_features(raw_days_past_due=-5, has_open_promise_not_yet_due=True)
+    assert model.urgency_multiplier(features) == model.URGENCY_PRE_DUE
+
+
+def test_due_today_is_not_pre_due() -> None:
+    """dpd == 0 is due, not early. The boundary must not silently suppress today's work."""
+    assert model.urgency_multiplier(make_features(raw_days_past_due=0)) == model.URGENCY_BASE
+
+
+def test_pre_due_row_says_so() -> None:
+    scored = score_invoice(make_features(raw_days_past_due=-3))
+    # The composer capitalises the leading clause, so compare case-insensitively.
+    assert "not due yet" in scored.reason.lower()
+
+
+def test_pre_due_is_suppressed_but_never_filtered_out() -> None:
+    """Suppression is a ranking decision. A pre-due row still scores and still gets a reason."""
+    scored = score_invoice(make_features(raw_days_past_due=-20, payment_reliability=1.0))
+    assert scored.priority > 0
+    assert scored.reason
+
+
+# --- a reason string must justify its rank, never argue against it ---
+
+
+def test_a_negative_never_leads_the_reason() -> None:
+    """The bug this rule exists for: a row ranked 10th of 116 reading "recovery odds are thin"."""
+    features = make_features(
+        days_past_due=1.0,
+        touch_count=1.0,
+        broken_promise_count=1.0,
+        raw_days_past_due=128,
+        raw_touch_count=5,
+        raw_broken_promises=3,
+        raw_outstanding_paise=94_000_000,
+    )
+    clauses = reason_clauses(features)
+    assert clauses
+    assert clauses[0].polarity is not ClausePolarity.NEGATIVE
+
+
+def test_at_most_one_negative_clause() -> None:
+    features = make_features(
+        payment_reliability=1.0,
+        days_past_due=1.0,
+        touch_count=1.0,
+        broken_promise_count=1.0,
+        has_dispute=1.0,
+        raw_days_past_due=140,
+        raw_touch_count=6,
+        raw_broken_promises=3,
+        raw_avg_days_to_pay=20.0,
+    )
+    negatives = [c for c in reason_clauses(features) if c.polarity is ClausePolarity.NEGATIVE]
+    assert len(negatives) <= 1
+
+
+def test_a_negative_is_phrased_as_a_caveat_not_a_verdict() -> None:
+    features = make_features(
+        payment_reliability=1.0,
+        days_past_due=1.0,
+        raw_days_past_due=128,
+        raw_avg_days_to_pay=25.0,
+        raw_terms_days=30,
+    )
+    negatives = [c for c in reason_clauses(features) if c.polarity is ClausePolarity.NEGATIVE]
+    assert negatives
+    assert negatives[0].text.startswith("though ")
+    assert "odds are thin" not in negatives[0].text
+
+
+def test_an_all_negative_row_explains_why_it_still_ranks() -> None:
+    """Do not lead with a caveat and do not list reasons against acting."""
+    features = make_features(
+        days_past_due=1.0,
+        touch_count=1.0,
+        broken_promise_count=1.0,
+        raw_days_past_due=128,
+        raw_touch_count=5,
+        raw_broken_promises=3,
+        raw_outstanding_paise=94_000_000,
+    )
+    reason = build_reason(features, urgency=1.0)
+    assert "large enough to pursue" in reason
+    assert "₹9.4L" in reason
+
+
+def test_urgency_framing_leads_when_it_applies() -> None:
+    features = make_features(crosses_msme_45=True, days_past_due=0.5, raw_days_past_due=90)
+    clauses = reason_clauses(features)
+    assert clauses[0].polarity is ClausePolarity.NEUTRAL
+    assert "MSME" in clauses[0].text
+
+
+def test_reason_clauses_mirror_the_urgency_precedence() -> None:
+    """If the framing and the multiplier disagree, the merchant is told one thing and ranked by
+    another."""
+    both = make_features(raw_days_past_due=-5, crosses_msme_45=True)
+    assert "not due yet" in reason_clauses(both)[0].text
+    assert model.urgency_multiplier(both) == model.URGENCY_PRE_DUE

@@ -16,6 +16,7 @@ from sqlalchemy import text
 
 from app.clock import today
 from app.db import SessionLocal
+from app.scoring import model
 
 pytestmark = pytest.mark.usefixtures("db_available")
 
@@ -416,3 +417,156 @@ def test_rescore_does_not_touch_another_merchants_invoices(
         assert still_scored == 4
     finally:
         session.close()
+
+
+# --- calibration band ------------------------------------------------------------------------
+
+# ADR-008 "Calibration". Below 3x the model stops changing the ranking and `p x amount` collapses
+# into the amount sort the ADR rejects; above 8x, p saturates and one feature can flip an invoice
+# to near-zero, which makes the ordering brittle. LOGIT_SCALE = 6.0 targets ~5x.
+P_RANGE_MIN = 3.0
+P_RANGE_MAX = 8.0
+
+
+def test_p_range_on_seed_data_stays_in_band() -> None:
+    """The calibration guard.
+
+    A future weight change that quietly collapses the score spread back toward an amount sort
+    must fail loudly here rather than pass unnoticed -- the failure mode is silent, because a
+    flat model still produces a plausible-looking ranking and perfectly readable reason strings.
+    It just stops being the ranking doing the work.
+
+    Runs against the seeded book, since the whole question is what the spread looks like on real
+    data rather than at the theoretical extremes.
+    """
+    from sqlalchemy import select
+
+    from app.models.merchant import Merchant
+    from app.scoring.worklist import score_book
+
+    session = SessionLocal()
+    try:
+        merchant_id = session.execute(
+            select(Merchant.id).order_by(Merchant.created_at).limit(1)
+        ).scalar_one_or_none()
+        if merchant_id is None:
+            pytest.skip("database is not seeded; run `python -m app.seed`")
+        scored = score_book(session, merchant_id)
+    finally:
+        session.close()
+
+    if len(scored) < 50:
+        pytest.skip("seeded book too small to characterise the spread")
+
+    probabilities = [float(item.p_collectable) for item in scored]
+    spread = max(probabilities) / min(probabilities)
+
+    assert P_RANGE_MIN <= spread <= P_RANGE_MAX, (
+        f"p_collectable spread is {spread:.2f}x on seed data "
+        f"(min={min(probabilities):.3f}, max={max(probabilities):.3f}); "
+        f"ADR-008 calibrates LOGIT_SCALE={model.LOGIT_SCALE} to keep it within "
+        f"{P_RANGE_MIN}x-{P_RANGE_MAX}x. Below the floor the ranking degenerates into a pure "
+        f"amount sort; above the ceiling p saturates and single features flip rows."
+    )
+
+
+def test_scale_does_not_reorder_feature_contributions() -> None:
+    """Scaling is monotone, so reason strings are unaffected by the calibration constant.
+
+    Pinned as a test because it is the assumption that lets LOGIT_SCALE be tuned without
+    re-reviewing every reason string in the product.
+    """
+    from tests.test_scoring import make_features
+
+    features = make_features(
+        payment_reliability=0.7,
+        broken_promise_count=0.4,
+        engagement_rate=0.55,
+        days_past_due=0.6,
+        lifetime_revenue=0.9,
+        touch_count=0.3,
+    )
+    order = [c.feature for c in model.contributions(features)]
+
+    original = model.LOGIT_SCALE
+    try:
+        for scale in (1.0, 3.0, 6.0, 12.0):
+            model.LOGIT_SCALE = scale
+            assert [c.feature for c in model.contributions(features)] == order
+    finally:
+        model.LOGIT_SCALE = original
+
+
+def test_logit_is_the_scaled_weighted_sum() -> None:
+    """LOGIT_SCALE is applied once, at the logit, and not folded into the weights."""
+    from tests.test_scoring import make_features
+
+    features = make_features(payment_reliability=1.0, days_past_due=0.5)
+    assert model.weighted_sum(features) == pytest.approx(
+        model.W_PAYMENT_RELIABILITY + 0.5 * model.W_DAYS_PAST_DUE
+    )
+    assert model.logit(features) == pytest.approx(
+        model.LOGIT_INTERCEPT + model.LOGIT_SCALE * model.weighted_sum(features)
+    )
+
+
+def test_no_top_ranked_reason_leads_with_a_negative() -> None:
+    """On the seeded book, no highly-ranked row may open with an argument against chasing it.
+
+    Checked on real data as well as in unit tests because the composition rules only matter where
+    the feature mix is messy -- a large, very old invoice with several negatives is exactly the
+    row that used to produce "recovery odds are thin" at rank 10 of 116.
+    """
+    from sqlalchemy import select
+
+    from app.models.merchant import Merchant
+    from app.scoring.worklist import ClausePolarity, reason_clauses, score_book
+
+    session = SessionLocal()
+    try:
+        merchant_id = session.execute(
+            select(Merchant.id).order_by(Merchant.created_at).limit(1)
+        ).scalar_one_or_none()
+        if merchant_id is None:
+            pytest.skip("database is not seeded; run `python -m app.seed`")
+        scored = score_book(session, merchant_id)
+    finally:
+        session.close()
+
+    if len(scored) < 20:
+        pytest.skip("seeded book too small")
+
+    top20 = sorted(scored, key=lambda item: -item.priority)[:20]
+    offenders = [
+        (item.features.counterparty_name, item.reason)
+        for item in top20
+        if reason_clauses(item.features)[0].polarity is ClausePolarity.NEGATIVE
+    ]
+    assert not offenders, (
+        "these top-20 reason strings lead with an argument against their own rank: "
+        + "; ".join(f"{name}: {reason}" for name, reason in offenders)
+    )
+
+
+def test_no_seed_reason_string_contains_a_verdict_against_acting() -> None:
+    """Belt and braces on the phrasing itself, across the whole book rather than the top 20."""
+    from sqlalchemy import select
+
+    from app.models.merchant import Merchant
+    from app.scoring.worklist import score_book
+
+    session = SessionLocal()
+    try:
+        merchant_id = session.execute(
+            select(Merchant.id).order_by(Merchant.created_at).limit(1)
+        ).scalar_one_or_none()
+        if merchant_id is None:
+            pytest.skip("database is not seeded")
+        scored = score_book(session, merchant_id)
+    finally:
+        session.close()
+
+    banned = ("odds are thin", "returns are diminishing", "not a collections problem")
+    for item in scored:
+        for phrase in banned:
+            assert phrase not in item.reason, f"verdict phrasing survived: {item.reason}"

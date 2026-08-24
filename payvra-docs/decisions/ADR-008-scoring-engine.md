@@ -48,11 +48,148 @@ beats deep learning here, trains on CPU in seconds, and keeps the no-GPU propert
 | `lifetime_revenue` (relationship value) | +0.10 | worth more effort |
 | `touch_count` | −0.10 | diminishing returns |
 
-`urgency_multiplier`: `1.0` base, `1.3` if `crosses_msme_45`, `1.5` if approaching a limitation
-period, `0.5` if a promise is open and not yet due.
+### Urgency multiplier
+
+Tiers take **precedence, they do not multiply**. Most suppressive first; the first match wins.
+
+| Order | Multiplier | Condition | Why |
+|---|---|---|---|
+| 1 | `0.3` | `days_past_due < 0` | Inside terms. Nothing is late yet |
+| 2 | `0.5` | promise open, not yet due | We agreed to wait |
+| 3 | `1.3` | `crosses_msme_45` | Statutory interest is accruing — real leverage |
+| 4 | `1.5` | approaching a limitation period | *Specified, not implemented — see below* |
+| 5 | `1.0` | otherwise | Base |
+
+**Why a pre-due tier.** `p x amount` is expected recovery, but a worklist should rank expected
+**incremental** recovery — the lift from intervening. An invoice that will pay itself on time has
+almost none. Without this tier the model actively *rewards* pre-due invoices for being healthy:
+they carry the book's best `payment_reliability` and zero `days_past_due`, so they score highest
+on collectability. On the seed book that floated **9 of the top 20 rows onto money that was not
+yet due**, including rank 2. A merchant working that queue top-down spends their morning on
+invoices that were never at risk.
+
+`0.3` follows the pattern the `0.5` promise tier already set. Payment terms are a promise *we*
+made; the pre-due window is one we agreed to, and we should not be crowding a human triage queue
+inside it.
+
+**This suppresses ranking only.** Pre-due invoices stay **on** the worklist and stay eligible for
+the tier-1 pre-due courtesy note in the recovery sequence. They are never filtered out — they
+simply stop outranking overdue money in a human triage queue.
+
+**Why precedence rather than multiplication.** Composing tiers produces numbers that express no
+intention: `1.3 x 0.5 = 0.65` is neither "press, we have leverage" nor "wait, we gave our word".
+Each pairwise ordering is deliberate:
+
+- **pre-due beats the MSME uplift** — an invoice inside its own terms is not yet a
+  statutory-interest problem; the clock has not started.
+- **pre-due beats an open promise** (`0.3` over `0.5`) — both say wait, and when both apply the
+  more fundamental fact is that there is nothing overdue to chase.
+- **an open promise beats the MSME uplift** — the promise is the more recent commitment and the
+  one the counterparty will judge us on. Multiplying would quietly chase someone inside a window
+  we ourselves agreed to, which is the fastest way to turn a paying customer into a dispute.
+
+`days_past_due == 0` is **due, not early**: it takes the base tier, so today's work is never
+suppressed by a boundary condition.
 
 **These weights are a starting point and an assumption, not a finding.** Tune against seed data
 until the ranking is intuitively defensible, and say so honestly if a judge asks.
+
+Two scope notes on the table above:
+
+- **`exposure_share` is listed by FR-4.1 but is not weighted here.** It is extracted and logged
+  with the rest of the vector, so it is in the training set from day one, but it carries an
+  explicit `0.0` in `scoring/model.py` rather than an invented weight. Assigning it a value is a
+  deliberate open decision for this ADR, not an implementation detail.
+- **The `1.5` "approaching a limitation period" tier is specified but inert.** No limitation date
+  exists anywhere in the data model, so the tier is documented and unimplemented rather than
+  written as code keyed off a field that does not exist. It lands with the field.
+
+## Calibration
+
+The weights encode **direction and relative magnitude**. They do not, on their own, set the
+absolute range of the score — and the absolute range is what decides whether the model changes
+the ranking at all.
+
+`LOGIT_SCALE` in `scoring/model.py` sets that range: `logit = intercept + LOGIT_SCALE x Σ(w·f)`.
+
+**Why it is needed.** The weights sum to a magnitude of 1.50, so the reachable weighted sum is
+roughly `[-0.90, +0.60]`, and the logistic is near-linear over that interval. Unscaled,
+`p_collectable` spans only **1.45x** on seed data while invoice amounts span **60x**. Since
+`priority = p x amount x urgency`, the result is operationally an amount sort — 9 of the top 10
+rows match a pure value sort, which is precisely the alternative this ADR rejects under
+"Sort by amount". Worse than being useless, at that spread a reason string citing collectability
+actively misleads about what drove the row's position.
+
+**Evidence** (seed book, 116 open invoices, measured before choosing):
+
+| `LOGIT_SCALE` | p range | ratio | top-10 = pure amount sort | disputed mean rank |
+|---|---|---|---|---|
+| 1 (unscaled) | 0.442–0.640 | 1.45x | 9/10 | 71/116 |
+| 2 | 0.385–0.760 | 1.97x | 9/10 | 75/116 |
+| 3 | 0.331–0.849 | 2.57x | 8/10 | 79/116 |
+| 4 | 0.281–0.909 | 3.23x | 8/10 | 83/116 |
+| **6 (chosen)** | **0.196–0.969** | **4.94x** | **8/10** | **88/116** |
+| 8 | 0.133–0.990 | 7.47x | 7/10 | 92/116 |
+
+**Decision: `LOGIT_SCALE = 6.0`,** targeting a ~5x spread. Collectability genuinely varies over
+roughly 5–9x in real receivables — a disputed invoice from a serial promise-breaker against a
+clean one from a reliable payer ten days late — and 6.0 lands inside that band. Higher scales push
+`p` toward saturation, where a single feature can flip an invoice to near-zero and the ranking
+turns brittle.
+
+**Amount dominance at the top is correct and deliberately survives calibration.** `priority` is
+expected recovery, so a large invoice at moderate odds legitimately outranks a small one at good
+odds. Scaling widens how far the odds can move a row; it does not stop money counting. Scaling is
+monotone, so it cannot reorder feature contributions — reason strings are unaffected by this
+constant.
+
+**Scale is the first thing to revisit when real payment outcomes arrive**, ahead of the individual
+weights: it is one number, it is the one most obviously fitted to synthetic data, and it is the
+one whose effect is easiest to measure against actual recovery rates.
+
+**It becomes meaningless under the LightGBM migration.** Gradient boosting calibrates its own
+output; `LOGIT_SCALE`, `LOGIT_INTERCEPT` and the weight table all retire together when the model
+swaps. `scoring/features.py` is unaffected, which is the point of keeping it separate.
+
+`test_p_range_on_seed_data_stays_in_band` asserts the spread stays within 3x–8x on seed data, so a
+future weight change that quietly collapses the ranking back toward an amount sort fails loudly
+instead of passing.
+
+## Reason-string composition
+
+FR-4.3 requires a plain-English reason on every ranked row. That is a requirement about
+**content**, not only presence: **a reason string exists to justify the rank, so it must never
+read as an argument against it.**
+
+Ranking clauses by raw contribution magnitude does not give this for free. Negative contributions
+are frequently the largest — `has_dispute` at −0.40 is the biggest single weight in the table — so
+a naive "top three contributions" template produces sentences arguing the opposite of the ranking.
+Observed on seed data at rank 10 of 116:
+
+> ₹9.4L, 128 days. **128 days in arrears, so recovery odds are thin**; …
+
+That tells the merchant not to do the thing the ranking just told them to do. Rules, enforced in
+`scoring/worklist.py::reason_clauses`:
+
+1. **Lead with what put the row where it is.** Urgency framing first when it applies, then
+   positive contributions.
+2. **At most one negative, always trailing, always a qualifier** — phrased as a caveat rather
+   than a verdict: "though 128 days in arrears", never "so recovery odds are thin".
+3. **When every contribution is negative**, state why the row still ranks instead of listing
+   reasons not to act: "₹9.4L outstanding — large enough to pursue despite 128 days in arrears".
+4. **Never emit a string whose plain reading contradicts the rank.**
+
+Phrase functions therefore return neutral statements of fact. Whether a clause reads as a
+justification or a caveat is the composer's decision, not the phrase's — which is also why the
+verdict tails ("so returns are diminishing", "so this is a commercial problem, not a collections
+one") were removed from the phrase table rather than reworded in place.
+
+The urgency framing clause mirrors the multiplier precedence exactly. If they diverge, the
+merchant is told one thing and ranked by another.
+
+`test_no_top_ranked_reason_leads_with_a_negative` asserts this against the top 20 rows of the
+seeded book, and `test_no_seed_reason_string_contains_a_verdict_against_acting` checks the
+phrasing across the whole book.
 
 ## Alternatives considered
 
