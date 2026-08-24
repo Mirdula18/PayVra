@@ -1,0 +1,24 @@
+# Local development Postgres for `make db-up`. Production uses Neon (ADR-007);
+# DATABASE_URL is the only switch between the two.
+services:
+  db:
+    image: postgres:16
+    container_name: payvra-db
+    environment:
+      POSTGRES_USER: payvra
+      POSTGRES_PASSWORD: payvra
+      POSTGRES_DB: payvra
+    ports:
+      # Host 5433 -> container 5432, to avoid clashing with a native Postgres often already
+      # bound to 5432. DATABASE_URL must use 5433 to reach this container.
+      - "5433:5432"
+    volumes:
+      - payvra_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payvra -d payvra"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  payvra_pgdata:
