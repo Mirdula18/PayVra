@@ -48,6 +48,44 @@ You need, at minimum:
 
 Start at [`CLAUDE.md`](./CLAUDE.md). It routes to everything else.
 
+## Known limitations
+
+Deliberate scope cuts, listed so they are not mistaken for oversights. Each is a conscious
+trade made to get the recovery loop working end-to-end within a hackathon; none is load-bearing
+for the parts of the system that are meant to be judged.
+
+### Authentication is a placeholder
+
+**The bearer token is the merchant's UUID.** There is no signing, no expiry, no user table, no
+password, and no roles. `Authorization: Bearer <merchant-uuid>` is looked up directly against
+`merchants.id` in `api/app/deps.py`. Anyone who knows or guesses a merchant id can act as that
+merchant. **This must not be deployed anywhere real as-is.**
+
+What *is* built and tested is the isolation **shape**, which is the part that would be expensive
+to retrofit:
+
+- `merchant_id` is resolved once, in a dependency, from the `Authorization` header
+- **no endpoint accepts a merchant id from a path, query, or body parameter** — there is no code
+  path that reads caller-supplied identity
+- every query is scoped by the resolved merchant
+- a cross-tenant resource returns **404, not 403** — "this exists but is not yours" leaks the
+  existence of another tenant's data
+- a token naming a merchant that does not exist fails closed with 401, rather than silently
+  returning an empty result set
+
+Ten tests cover this (`api/tests/test_batches_api.py`). Replacing the placeholder with real token
+verification changes one function and nothing above it.
+
+### Other cuts
+
+| Limitation | Detail |
+|---|---|
+| LLM column mapping is a stub | `ingestion/mapper.llm_map_headers` returns `{}`. The rule dictionary covers Tally/Zoho/Busy exports; anything else is resolved by the merchant via `POST /batches/{id}/mapping`. Lands in Phase 5. |
+| Historical DSO is synthetic | Only the latest `metrics_snapshots` row carries a computed collection period. The 13-day run-up is a ramp that terminates on the real figure — reconstructing true as-of-date DSO needs historical balances the seed does not model. |
+| Audit log is tamper-*evident*, not tamper-*proof* | A superuser with `ALTER TABLE` can drop the rules and trigger. The hash chain makes that detectable, not preventable. See **Audit log** in `docs/glossary.md`. |
+| Original upload files are not retained | `batch_rows` stores every parsed row instead. Invoice files are merchant PII and keeping them is a liability with no upside. |
+| Razorpay test mode only | No real money moves. |
+
 ## Status
 
 Hackathon MVP. Razorpay test mode only. No real money moves.

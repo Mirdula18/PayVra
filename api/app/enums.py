@@ -98,6 +98,46 @@ class ActorType(StrEnum):
     COUNTERPARTY = "counterparty"
 
 
+class BatchStatus(StrEnum):
+    """Lifecycle of one uploaded file. ``awaiting_repair`` means rows need merchant input."""
+
+    PARSING = "parsing"
+    AWAITING_REPAIR = "awaiting_repair"
+    COMPLETE = "complete"
+
+
+class BatchRowStatus(StrEnum):
+    """Per-row outcome. ``repaired`` is a row the merchant fixed and we then ingested."""
+
+    OK = "ok"
+    REPAIR_NEEDED = "repair_needed"
+    REPAIRED = "repaired"
+    DISCARDED = "discarded"
+
+
+class RepairErrorCode(StrEnum):
+    """Why a row could not become an Invoice.
+
+    Deliberately NOT a CHECK-constrained column: validation rules gain codes often, and a
+    migration per new code is friction with no integrity payoff. ``batch_rows.error_code`` is
+    plain TEXT; this enum is the application-side vocabulary and what the UI switches on.
+    """
+
+    MISSING_INVOICE_NUMBER = "missing_invoice_number"
+    MISSING_COUNTERPARTY = "missing_counterparty"
+    MISSING_AMOUNT = "missing_amount"
+    UNPARSEABLE_AMOUNT = "unparseable_amount"
+    NON_POSITIVE_AMOUNT = "non_positive_amount"
+    MISSING_DUE_DATE = "missing_due_date"
+    UNPARSEABLE_DATE = "unparseable_date"
+    IMPOSSIBLE_DATE = "impossible_date"
+    DUE_BEFORE_ISSUE = "due_before_issue"
+    INVALID_GSTIN = "invalid_gstin"
+    AMBIGUOUS_COUNTERPARTY = "ambiguous_counterparty"
+    AMBIGUOUS_DATE_FORMAT = "ambiguous_date_format"
+    UNMAPPED_REQUIRED_COLUMN = "unmapped_required_column"
+
+
 # Registry: (table_name, column_name) -> StrEnum. The single source for CHECK-constraint
 # generation (see app.models.base.enum_check) and for test_enum_parity.
 ENUM_COLUMNS: dict[tuple[str, str], type[StrEnum]] = {
@@ -114,6 +154,8 @@ ENUM_COLUMNS: dict[tuple[str, str], type[StrEnum]] = {
     ("replies", "channel"): Channel,
     ("replies", "intent"): ReplyIntent,
     ("audit_log", "actor"): ActorType,
+    ("batches", "status"): BatchStatus,
+    ("batch_rows", "status"): BatchRowStatus,
 }
 
 

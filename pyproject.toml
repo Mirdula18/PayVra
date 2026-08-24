@@ -18,6 +18,11 @@ dependencies = [
   "alembic>=1.13,<2.0",
   "psycopg[binary]>=3.1,<4.0",
   "APScheduler>=3.10,<4.0",
+  # Ingestion. Deliberately no pandas: it type-coerces on read, which would silently
+  # reinterpret the raw date/amount strings the normalizer must inspect verbatim.
+  "rapidfuzz>=3.9,<4.0",       # counterparty matching (token_sort_ratio @ 88)
+  "openpyxl>=3.1,<4.0",        # XLSX parsing; CSV uses the stdlib
+  "python-multipart>=0.0.9",   # multipart/form-data for POST /batches
 ]
 
 [project.optional-dependencies]
@@ -25,6 +30,7 @@ dev = [
   "ruff>=0.5.0",
   "mypy>=1.10",
   "pytest>=8.2",
+  "httpx>=0.27",               # fastapi.testclient
 ]
 
 [tool.setuptools]

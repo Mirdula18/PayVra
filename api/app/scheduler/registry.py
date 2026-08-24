@@ -18,6 +18,7 @@ from app.db import engine
 from app.scheduler.state import SchedulerState
 
 HEARTBEAT_JOB_ID = "heartbeat"
+REFRESH_AGING_JOB_ID = "refresh_aging"
 
 
 def build_scheduler() -> BackgroundScheduler:
@@ -31,7 +32,7 @@ def build_scheduler() -> BackgroundScheduler:
 
 
 def register_jobs(scheduler: BackgroundScheduler) -> None:
-    """Register Phase 0 jobs. Idempotent: ``replace_existing`` avoids duplicates on restart."""
+    """Register Phase 1 jobs. Idempotent: ``replace_existing`` avoids duplicates on restart."""
     scheduler.add_job(
         "app.scheduler.jobs:heartbeat",
         trigger="interval",
@@ -40,6 +41,18 @@ def register_jobs(scheduler: BackgroundScheduler) -> None:
         replace_existing=True,
         # Fire once at startup so liveness is observable immediately, not one interval later.
         next_run_time=now_utc(),
+    )
+
+    # FR-3.1: aging refreshed nightly. 00:30 IST -- after the business day has rolled over in
+    # Kolkata (app.clock.today), and before the morning dispatch window opens at 08:00, so the
+    # first send of the day reads today's days_past_due and not yesterday's.
+    scheduler.add_job(
+        "app.scheduler.jobs:refresh_aging_all",
+        trigger="cron",
+        hour=0,
+        minute=30,
+        id=REFRESH_AGING_JOB_ID,
+        replace_existing=True,
     )
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 from app.models.action import Action
 from app.models.audit_log import AuditLog
 from app.models.base import Base
+from app.models.batch import Batch
+from app.models.batch_row import BatchRow
 from app.models.consent import Consent
 from app.models.contact import Contact
 from app.models.counterparty import Counterparty
@@ -32,4 +34,6 @@ __all__ = [
     "WebhookEvent",
     "AuditLog",
     "MetricsSnapshot",
+    "Batch",
+    "BatchRow",
 ]

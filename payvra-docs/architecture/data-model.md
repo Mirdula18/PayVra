@@ -1,8 +1,8 @@
 # Data Model
 
-PostgreSQL 16. All tables carry `merchant_id` for tenant isolation; every query must be scoped.
-Money is stored in **paise as BIGINT**, never as float. Timestamps are `TIMESTAMPTZ`, stored UTC,
-displayed IST.
+PostgreSQL 16. **15 domain tables.** All tables carry `merchant_id` for tenant isolation, directly
+or through their parent; every query must be scoped. Money is stored in **paise as BIGINT**, never
+as float. Timestamps are `TIMESTAMPTZ`, stored UTC, displayed IST.
 
 ---
 
@@ -30,8 +30,13 @@ application cannot drift. `test_enum_parity` asserts every enum value appears in
 | `reply_intent` | `dispute`, `promise_to_pay`, `query`, `refusal`, `wrong_contact`, `acknowledgment`, `unclear` |
 | `stop_reason` | `settled`, `disputed`, `opted_out`, `broken_promises_exceeded`, `touch_cap_reached`, `no_consent`, `merchant_excluded`, `written_off` |
 | `actor_type` | `agent`, `human`, `system`, `counterparty` |
+| `batch_status` | `parsing`, `awaiting_repair`, `complete` |
+| `batch_row_status` | `ok`, `repair_needed`, `repaired`, `discarded` |
 
 The meaning of each `recovery_state` is documented at the **Recovery state machine** section below.
+
+`batch_rows.error_code` is a deliberate exception to the CHECK-constraint rule and stays plain
+`TEXT` — see the `batch_rows` section for why, and for the code vocabulary.
 
 ---
 
@@ -342,12 +347,93 @@ Unique: `(merchant_id, snapshot_date)`.
 
 ---
 
+## `batches`
+
+One uploaded invoice file and its ingestion outcome. Added in Phase 1 (migration `0003`).
+
+Holds the resolved `column_mapping` so `POST /batches/{id}/mapping` can re-parse without the
+merchant re-uploading, and the per-outcome counters `POST /batches` returns.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `merchant_id` | UUID FK | tenant scope; every batch query filters on it |
+| `name` | TEXT NULL | merchant-supplied label, e.g. "August ledger" |
+| `filename` | TEXT | the uploaded file's name, for the repair UI |
+| `column_mapping` | JSONB | original header -> canonical field, e.g. `{"Bill No": "invoice_number"}` |
+| `row_count` | INT | data rows parsed, excluding the header |
+| `created_count` | INT | new invoices |
+| `updated_count` | INT | existing invoices whose money changed |
+| `duplicate_count` | INT | rows matching an existing `(merchant_id, invoice_number)` |
+| `repair_count` | INT | rows currently needing merchant input; decrements as they are repaired |
+| `status` | batch_status | `parsing` / `awaiting_repair` / `complete` |
+| `created_at` | TIMESTAMPTZ | |
+
+The original file is **not** stored. Invoice files are merchant PII and retaining them is a
+liability with no upside — `batch_rows` already holds every parsed row, which is all a re-parse
+needs.
+
+---
+
+## `batch_rows`
+
+The raw parsed row behind every ingested invoice and every repair-queue item. Added in Phase 1
+(migration `0003`).
+
+Storing `raw` verbatim is what lets the repair queue show the merchant *exactly* what came out of
+their file, rather than a normalised guess at it, and lets a corrected row be reprocessed without
+re-uploading. `invoice_id` links back once the row successfully becomes an Invoice.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | |
+| `batch_id` | UUID FK | |
+| `row_number` | INT | 1-based as the merchant sees it; the header is row 1, so the first data row is 2 |
+| `raw` | JSONB | header -> cell text, exactly as parsed. Never normalised |
+| `status` | batch_row_status | `ok` / `repair_needed` / `repaired` / `discarded` |
+| `error_code` | TEXT NULL | see below |
+| `error_detail` | TEXT NULL | human-readable, names the offending value |
+| `invoice_id` | UUID FK NULL | set once the row becomes an Invoice |
+| `created_at` | TIMESTAMPTZ | |
+
+Index: `(batch_id, status)` — backs `GET /batches/{id}/repairs`, which filters to
+`status = 'repair_needed'`.
+
+`error_code` is deliberately plain `TEXT` rather than a CHECK-constrained enum: validation rules
+gain codes often, and a migration per new code is friction with no integrity payoff. The
+application-side vocabulary is `RepairErrorCode` in `app/enums.py`, and it is what the UI switches
+on:
+
+| Code | Meaning |
+|---|---|
+| `missing_invoice_number` | the invoice number cell is blank |
+| `missing_counterparty` | the customer name cell is blank |
+| `missing_amount` | the amount cell is blank |
+| `unparseable_amount` | not numeric after cleaning, e.g. `Rs. Twelve Thousand` |
+| `non_positive_amount` | zero or negative invoice amount |
+| `missing_due_date` | FR-1.3 — a row without a due date cannot be aged |
+| `unparseable_date` | not a recognised date shape under the batch's format |
+| `impossible_date` | a real shape but not a real date, e.g. `32/02/2026` |
+| `due_before_issue` | the dates contradict each other |
+| `invalid_gstin` | not a valid 15-character GSTIN |
+| `ambiguous_counterparty` | two or more existing counterparties matched at or above the fuzzy threshold; the merchant picks, because a false merge combines payment histories and consent records and cannot be undone |
+| `ambiguous_date_format` | **batch-level** — DD/MM could not be told from MM/DD |
+| `unmapped_required_column` | **batch-level** — no column mapped to a required field |
+
+The two batch-level codes apply to *every* row of the batch. When the date format cannot be
+resolved from the file's own evidence, the whole batch goes to the repair queue rather than any
+row being imported under a guessed format — see `agents/backend.md` and
+`app/ingestion/normalizer.py`.
+
+---
+
 ## `apscheduler_jobs` (infrastructure, not a domain table)
 
 Created **at runtime by APScheduler**, not by an Alembic migration — it will not appear in
 `0001_initial_schema.py`, but it does appear in `\dt`. Listed here only so the table count
-reconciles: the 13 tables above are the domain model; `apscheduler_jobs` and `alembic_version`
-are infrastructure, for 15 relations total in a migrated database.
+reconciles: the **15 domain tables** above are the domain model (13 from migration `0001`, plus
+`batches` and `batch_rows` from `0003`); `apscheduler_jobs` and `alembic_version` are
+infrastructure, for 17 relations total in a migrated database.
 
 APScheduler owns the schema and may change it across versions, so nothing in `app/` reads or
 writes it directly — treat it as opaque. See ADR-007 (APScheduler in-process, Postgres job store).
