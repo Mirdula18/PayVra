@@ -18,12 +18,11 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.audit.log import record, verify_chain
 from app.clock import IST, today
-from app.db import SessionLocal
+from app.db import SessionLocal, engine
 from app.enums import (
     ActionStatus,
     ActionType,
@@ -35,10 +34,10 @@ from app.enums import (
     StopReason,
     UnpaidCause,
 )
+from app.metrics import collection_period_days, mean_days_past_due, quantize_days
 from app.models import (
     Action,
     AuditLog,
-    Base,
     Consent,
     Contact,
     Counterparty,
@@ -66,6 +65,8 @@ from app.seed.data import (
 
 INVOICE_TARGET = 120
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+# builder.py -> seed -> app -> api/; alembic.ini sits at api/alembic.ini.
+ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 
 # Correlation between invoice size and age; tuned so the amount-weighted collection period lands
 # near the 73-day headline (docs/vision.md). See _build_invoices.
@@ -178,10 +179,6 @@ class SeedBuilder:
         self.invoices_by_cp: dict[uuid.UUID, list[Invoice]] = {}
 
     # -- lifecycle ---------------------------------------------------------------------------
-    def truncate(self) -> None:
-        tables = ", ".join(Base.metadata.tables.keys())
-        self.db.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
-
     def build(self) -> None:
         self._build_merchant()
         self._build_counterparties()
@@ -746,6 +743,23 @@ class SeedBuilder:
             if i.payment_status != PaymentStatus.PAID.value
         )
         recovered_total = sum(i.amount_paise for i in settled)
+
+        # api-contracts.md: "Compute it, never assert it." Today's snapshot carries the real
+        # amount-weighted collection period, from the same app.metrics formula the seed summary
+        # and (Phase 1) GET /metrics use -- so the dashboard cannot contradict the seed on stage.
+        # The 14-day run-up is synthetic: reconstructing a true as-of-date DSO needs historical
+        # outstanding balances the seed does not model. It is a ramp that LANDS on the computed
+        # figure rather than a hardcoded number that happens to look plausible.
+        dso_today = collection_period_days(
+            (
+                (i.issue_date, i.outstanding_paise)
+                for i in self.invoices
+                if i.payment_status != PaymentStatus.PAID.value
+            ),
+            as_of=self.anchor,
+        )
+        dso_start = dso_today + Decimal("7")
+
         for offset in range(13, -1, -1):
             snap_date = self.anchor - timedelta(days=offset)
             fraction = (13 - offset + 1) / 14
@@ -757,7 +771,9 @@ class SeedBuilder:
                     snapshot_date=snap_date,
                     total_outstanding_paise=open_outstanding + recovered_total - recovered_so_far,
                     recovered_paise=int(recovered_total / 14),
-                    dso_days=Decimal(str(round(78 - 7 * fraction, 1))),
+                    dso_days=quantize_days(
+                        dso_start - (dso_start - dso_today) * Decimal(str(fraction))
+                    ),
                     recovery_rate=Decimal(str(round(0.18 * fraction, 4))),
                     promise_kept_rate=Decimal("0.62"),
                     invoices_by_state=self._state_counts(),
@@ -912,10 +928,12 @@ def _summary(db: Session, anchor: date) -> str:
     ).all()
     for bucket, _dpd, _issue, _out in rows:
         buckets[bucket] = buckets.get(bucket, 0) + 1
-    # Amount-weighted collection period (days since issue) — the DSO-style headline proxy.
-    weighted_num = sum((anchor - issue).days * out for _b, _d, issue, out in rows)
-    weighted_den = sum(out for _b, _d, _issue, out in rows) or 1
-    collection_period = weighted_num / weighted_den
+    # Both figures, from app.metrics, always labelled. They are different measurements and
+    # confusing them once already cost a verification cycle - see agents/data-and-seed.md.
+    collection_period = collection_period_days(
+        ((issue, out) for _b, _d, issue, out in rows), as_of=anchor
+    )
+    mean_dpd = mean_days_past_due(dpd for _b, dpd, _issue, _out in rows)
     n_partial = db.execute(
         select(func.count())
         .select_from(Invoice)
@@ -937,17 +955,39 @@ def _summary(db: Session, anchor: date) -> str:
         f"counterparties={n_cp}  invoices={n_inv}  audit_entries={n_audit}  blocked={n_blocked}\n"
         f"partial={n_partial}  settled={n_settled}  msme_45_crossings={n_msme}\n"
         f"open aging  {dist}\n"
-        f"amount-weighted collection period={collection_period:.0f} days"
+        f"collection period (amount-weighted, from issue date): {collection_period} d\n"
+        f"mean days-past-due (open invoices, from due date):    {mean_dpd} d"
     )
+
+
+def rebuild_schema() -> None:
+    """Drop and recreate the schema via Alembic, so the seed always starts from a clean database.
+
+    The seed cannot TRUNCATE: ``audit_log`` is protected by a BEFORE TRUNCATE trigger (migration
+    0002) and that guarantee deliberately has no escape hatch. "Append-only except when a flag is
+    set" is not a guarantee. Rebuilding the schema costs a couple of seconds and keeps the
+    append-only property intact -- a DROP TABLE during ``downgrade`` is not a TRUNCATE, so the
+    trigger is never reached.
+    """
+    from alembic.config import Config
+
+    from alembic import command
+
+    # Pooled connections would hold locks on tables the downgrade is about to drop.
+    engine.dispose()
+    cfg = Config(str(ALEMBIC_INI))
+    command.downgrade(cfg, "base")
+    command.upgrade(cfg, "head")
+    engine.dispose()
 
 
 def run(reset: bool = False, demo: bool = False) -> None:
     """Build the seed dataset. ``reset``/``demo`` are accepted for the Make targets; the build is
-    always a deterministic full rebuild (truncate + seed), so it is safe to run repeatedly."""
+    always a deterministic full rebuild (schema rebuild + seed), so it is safe to run repeatedly."""
+    rebuild_schema()
     db = SessionLocal()
     try:
         builder = SeedBuilder(db)
-        builder.truncate()
         builder.build()
         db.commit()
         chain_ok = verify_chain(db, builder.merchant.id)
@@ -963,7 +1003,7 @@ def run(reset: bool = False, demo: bool = False) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="app.seed", description="Seed the PAYVRA database.")
-    parser.add_argument("--reset", action="store_true", help="truncate and reseed")
+    parser.add_argument("--reset", action="store_true", help="rebuild the schema and reseed")
     parser.add_argument("--demo", action="store_true", help="deterministic curated state")
     args = parser.parse_args(argv)
     run(reset=args.reset, demo=args.demo)

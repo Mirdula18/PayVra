@@ -273,7 +273,7 @@ on conflict, return 200 and do nothing.
 
 ## `audit_log`
 
-Append-only. Hash-chained. No UPDATE, no DELETE — enforced by trigger.
+Append-only. Hash-chained. No UPDATE, no DELETE, no TRUNCATE — enforced at the database.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -295,13 +295,36 @@ Append-only. Hash-chained. No UPDATE, no DELETE — enforced by trigger.
 ```sql
 CREATE RULE audit_log_no_update AS ON UPDATE TO audit_log DO INSTEAD NOTHING;
 CREATE RULE audit_log_no_delete AS ON DELETE TO audit_log DO INSTEAD NOTHING;
+
+-- RULEs do not cover TRUNCATE. Without this trigger, `TRUNCATE audit_log CASCADE` silently
+-- empties the table -- including indirectly, via TRUNCATE ... CASCADE from `merchants`.
+-- Raises unconditionally: no GUC, no session flag, no bypass. The seed rebuilds the schema
+-- (alembic downgrade base && alembic upgrade head) rather than truncating.
+CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log
+  FOR EACH STATEMENT EXECUTE FUNCTION audit_log_forbid_truncate();
 ```
+
+Index: `(merchant_id, created_at DESC)` — backs the default reverse-chronological `GET /audit` feed.
+Index: `(merchant_id, outcome)` — backs the AuditLog screen's one-click `blocked` filter.
+
+For the precise scope of the append-only guarantee — what it does and does not protect against —
+see **Audit log** in `docs/glossary.md`. It is tamper-*evident* against a privileged operator,
+not tamper-*proof*.
 
 ---
 
 ## `metrics_snapshots`
 
 Daily rollup so the dashboard never recomputes DSO on the fly.
+
+`dso_days` **must** be computed via `app/metrics.py::collection_period_days` — the single source
+of truth, shared with the seed summary and `GET /metrics.dso_before_days`. Do not re-derive the
+formula at the call site and do not hardcode a plausible-looking figure: api-contracts.md is
+explicit that this number is computed, never asserted. Three independent implementations is how
+the dashboard ends up contradicting the seed mid-demo.
+
+Note it measures from the **issue** date and is amount-weighted; it is not mean days-past-due.
+See the metric note in `agents/data-and-seed.md`.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -310,12 +333,33 @@ Daily rollup so the dashboard never recomputes DSO on the fly.
 | `snapshot_date` | DATE | |
 | `total_outstanding_paise` | BIGINT | |
 | `recovered_paise` | BIGINT | since previous snapshot |
-| `dso_days` | NUMERIC | |
+| `dso_days` | NUMERIC | amount-weighted collection period, from the **issue** date |
 | `recovery_rate` | NUMERIC | |
 | `promise_kept_rate` | NUMERIC | |
 | `invoices_by_state` | JSONB | |
 
 Unique: `(merchant_id, snapshot_date)`.
+
+---
+
+## `apscheduler_jobs` (infrastructure, not a domain table)
+
+Created **at runtime by APScheduler**, not by an Alembic migration — it will not appear in
+`0001_initial_schema.py`, but it does appear in `\dt`. Listed here only so the table count
+reconciles: the 13 tables above are the domain model; `apscheduler_jobs` and `alembic_version`
+are infrastructure, for 15 relations total in a migrated database.
+
+APScheduler owns the schema and may change it across versions, so nothing in `app/` reads or
+writes it directly — treat it as opaque. See ADR-007 (APScheduler in-process, Postgres job store).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | VARCHAR(191) PK | job id, assigned by APScheduler |
+| `next_run_time` | DOUBLE PRECISION NULL | epoch seconds; NULL when the job is paused |
+| `job_state` | BYTEA | pickled job definition — opaque to this application |
+
+Also carries `ix_apscheduler_jobs_next_run_time` on `next_run_time`, created by APScheduler.
+Neither this index nor the two above count toward the project's own named-index inventory.
 
 ---
 

@@ -65,7 +65,22 @@ and `Sundaram Auto Comp.` — so the fuzzy matcher demonstrably works.
 
 - Amounts: log-normal, ₹18,000 to ₹14,00,000. Median around ₹1.8L. Real B2B invoices are not uniform.
 - Terms: 82% on 0–30 day terms, matching the Recordent finding
-- Aging: seed so the batch lands near a **73-day average collection period** — our headline stat
+- Aging: seed so the batch lands near a **73-day average collection period** (amount-weighted,
+  DSO formula, measured from the **issue** date) — our headline stat. This is **NOT** a 73-day
+  mean days-past-due, which is measured from the **due** date and is a different, much smaller
+  number (~27 days on this batch). The two are routinely confused; do not "fix" the seed to make
+  mean DPD equal 73.
+
+  > **Why they cannot both be 73.** A 73-day mean DPD is arithmetically incompatible with the
+  > aging-bucket distribution below. Pinning all four of the lower buckets at their exact upper
+  > bounds gives 48×0 + 26×30 + 22×60 + 14×90 = 3360 DPD-days over 110 invoices — a mean of
+  > 28.0 even if the 90+ bucket were zero. A mean of 73 over 120 invoices needs 8760 DPD-days,
+  > leaving 5400 for the 10 invoices in the 90+ bucket: an average of **540 days past due**
+  > (~18 months) each. Either the bucket distribution holds or mean DPD is 73; never both.
+
+  Both figures are printed on every seed run, always labelled, so they cannot be mistaken for
+  each other. Both come from `app/metrics.py` — the single source of truth for this formula,
+  shared with `metrics_snapshots.dso_days` and (Phase 1) `GET /metrics`.
 - Aging buckets: roughly 40% current, 22% in 0–30, 18% in 31–60, 12% in 61–90, 8% at 90+
 - 6 invoices with partial payments already applied
 - 4 invoices crossing the MSME Act 45-day threshold, on `is_msme = true` counterparties

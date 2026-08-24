@@ -92,6 +92,23 @@ the exception list.
 **Audit log** — Append-only, hash-chained record of every decision, its inputs, the rationale, the
 guardrail verdicts, and the outcome. Includes actions that were *refused*.
 
+*What "append-only" actually guarantees, precisely:* **the application cannot tamper with it.**
+Entries are INSERT-only and hash-chained per merchant (`entry_hash = sha256(canonical(row) +
+prev_hash)`), so any edit to a stored row is detectable by re-walking the chain. At the database
+level, UPDATE and DELETE are rewritten to no-ops by two PostgreSQL RULEs, and TRUNCATE — which
+RULEs do not cover — raises via a BEFORE TRUNCATE trigger. There is no flag, GUC, or session
+variable that disables any of these; the seed rebuilds the schema rather than truncating.
+
+*What it does not guarantee:* this is not tamper-**proof** storage. A superuser, or any role with
+ALTER TABLE on `audit_log`, can drop the rules and the trigger and then rewrite rows freely. The
+hash chain still makes such tampering *detectable* — an attacker would have to recompute every
+subsequent `entry_hash` — but detection is not prevention. A genuine append-only guarantee against
+a privileged operator needs external anchoring (periodic chain-head export to WORM storage or a
+third party), which is out of scope for the hackathon build.
+
+State this boundary plainly if asked. The honest answer is stronger than an overclaim someone
+disproves in the Q&A.
+
 **Gate** — The deterministic guardrail check every proposed action passes through before execution.
 See `architecture/agent-loop.md`.
 
