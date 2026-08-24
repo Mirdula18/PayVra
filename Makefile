@@ -1,0 +1,82 @@
+# PAYVRA — developer entrypoints. Requires GNU make.
+# DATABASE_URL (from .env / environment) is the only switch between local Docker
+# Postgres and Neon. See ADR-007.
+
+.DEFAULT_GOAL := help
+.PHONY: help install db-up db-down migrate seed seed-reset seed-demo dev web test lint typecheck fmt
+
+# --- venv layout differs on Windows vs POSIX ---
+VENV := .venv
+ifeq ($(OS),Windows_NT)
+  VENV_BIN := $(VENV)/Scripts
+else
+  VENV_BIN := $(VENV)/bin
+endif
+PY      := $(VENV_BIN)/python
+PIP     := $(VENV_BIN)/pip
+ALEMBIC := $(VENV_BIN)/alembic
+UVICORN := $(VENV_BIN)/uvicorn
+PYTEST  := $(VENV_BIN)/pytest
+RUFF    := $(VENV_BIN)/ruff
+MYPY    := $(VENV_BIN)/mypy
+
+# alembic.ini lives under api/; %(here)s makes script_location cwd-independent.
+ALEMBIC_INI := api/alembic.ini
+
+help:
+	@echo "PAYVRA make targets:"
+	@echo "  install     Create .venv, install backend (editable) + web deps"
+	@echo "  db-up       Start Docker Postgres and run migrations to head"
+	@echo "  db-down     Stop and remove the Docker Postgres container"
+	@echo "  migrate     alembic upgrade head (against DATABASE_URL)"
+	@echo "  seed        Seed 120 invoices / 34 counterparties / 60 days history"
+	@echo "  seed-reset  Truncate all app tables, then reseed"
+	@echo "  seed-demo   Deterministic curated state for the pitch"
+	@echo "  dev         Run the API (uvicorn, reload). Web: 'make web'"
+	@echo "  web         Run the Vite dev server"
+	@echo "  test        Run pytest"
+	@echo "  lint / typecheck / fmt   ruff check / mypy / ruff format"
+
+install:
+	python -m venv $(VENV)
+	$(PIP) install --upgrade pip
+	$(PIP) install -e ".[dev]"
+	cd web && npm install
+
+db-up:
+	docker compose up -d db
+	docker compose exec -T db bash -c 'until pg_isready -U payvra -d payvra; do sleep 1; done'
+	$(ALEMBIC) -c $(ALEMBIC_INI) upgrade head
+
+db-down:
+	docker compose down
+
+migrate:
+	$(ALEMBIC) -c $(ALEMBIC_INI) upgrade head
+
+seed:
+	$(PY) -m app.seed
+
+seed-reset:
+	$(PY) -m app.seed --reset
+
+seed-demo:
+	$(PY) -m app.seed --demo
+
+dev:
+	$(UVICORN) app.main:app --reload --host 0.0.0.0 --port 8000
+
+web:
+	cd web && npm run dev
+
+test:
+	$(PYTEST)
+
+lint:
+	$(RUFF) check api
+
+typecheck:
+	$(MYPY) -p app
+
+fmt:
+	$(RUFF) format api

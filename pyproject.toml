@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "payvra"
+version = "0.0.0"
+description = "PAYVRA — autonomous B2B receivables-recovery agent on Razorpay rails."
+# Deploy target is Python 3.12 (ADR-002). Floor is 3.11 so the repo also runs on
+# developer machines that have not upgraded yet; nothing here uses 3.12-only syntax.
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.111,<1.0",
+  "uvicorn[standard]>=0.30,<1.0",
+  "pydantic>=2.7,<3.0",
+  "pydantic-settings>=2.3,<3.0",
+  "SQLAlchemy>=2.0.30,<2.1",
+  "alembic>=1.13,<2.0",
+  "psycopg[binary]>=3.1,<4.0",
+  "APScheduler>=3.10,<4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.5.0",
+  "mypy>=1.10",
+  "pytest>=8.2",
+]
+
+[tool.setuptools]
+# The Python package lives under api/, invoked as `app.*` and `python -m app.seed`.
+package-dir = { "" = "api" }
+
+[tool.setuptools.packages.find]
+where = ["api"]
+include = ["app*"]
+
+# --- Ruff (prompts/coding-standards.md: ruff format + check, line length 100) ---
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["api"]
+extend-exclude = ["api/alembic/versions"]
+
+[tool.ruff.lint]
+# Note: flake8-type-checking (TCH/TC) is deliberately NOT enabled — SQLAlchemy 2.0 resolves
+# Mapped[...] annotations at runtime, so moving those imports under TYPE_CHECKING breaks mapping.
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+# --- Mypy (coding-standards: --strict on agent/, guardrails/, reconciliation/; best-effort else) ---
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "api"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+# Best-effort baseline across the whole app.
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["app.agent.*", "app.guardrails.*", "app.reconciliation.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+warn_return_any = true
+strict_equality = true
+no_implicit_optional = true
+
+# Alembic migrations are generated/DDL scaffolding, not strict-typed application code.
+[[tool.mypy.overrides]]
+module = ["alembic.*"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+pythonpath = ["api"]
+testpaths = ["api/tests"]
+addopts = "-ra"
