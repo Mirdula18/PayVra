@@ -30,6 +30,7 @@ from app.exceptions import (
     PayvraError,
     ValidationError,
 )
+from app.generation import llm
 from app.routers import batches, invoices, webhooks, worklist
 from app.scheduler.registry import build_scheduler, health_snapshot, register_jobs
 
@@ -59,6 +60,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="PAYVRA API", version="0.1.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _mark_request_path(request: Request, call_next: Any) -> Any:
+    """Mark request handling so ``generation.llm`` can refuse to run inside it.
+
+    agents/agent-engine.md forbids an LLM call in a request-response path: a multi-second model
+    call holds a worker, and inside the webhook handler it would blow the 200 ms acknowledgement
+    budget and turn one payment into a Razorpay retry storm. This makes that rule enforceable in
+    code rather than a comment someone has to remember -- the same reasoning as delivery/sender.py
+    taking its gate verdict as a required argument.
+    """
+    with llm.request_path():
+        return await call_next(request)
+
+
 app.include_router(batches.router, prefix=API_PREFIX)
 app.include_router(worklist.router, prefix=API_PREFIX)
 app.include_router(invoices.router, prefix=API_PREFIX)
