@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # Scheduler
     scheduler_heartbeat_seconds: int = 60
 
+    # Public base URL, used to build the opt-out links embedded in every outbound message.
+    # Must be reachable by a recipient: a localhost opt-out link is not an opt-out mechanism.
+    public_base_url: str = "http://localhost:8000"
+
     # Agent / LLM
     llm_enabled: bool = False
     reply_confidence_threshold: float = 0.70
