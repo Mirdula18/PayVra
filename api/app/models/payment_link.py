@@ -5,7 +5,15 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, created_at_col, uuid_pk
@@ -29,4 +37,10 @@ class PaymentLink(Base):
 
     created_at: Mapped[datetime] = created_at_col()
 
-    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_payment_link_idempotency"),)
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_payment_link_idempotency"),
+        # Reconciliation resolves a webhook to an invoice through this id and assumes at most one
+        # row. A Razorpay link id is globally unique, so the constraint says so rather than
+        # leaving reconciliation to discover a duplicate mid-payment.
+        Index("idx_payment_link_razorpay_id", "razorpay_link_id", unique=True),
+    )

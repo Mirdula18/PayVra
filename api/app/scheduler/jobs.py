@@ -1,7 +1,7 @@
 """Scheduled job callables.
 
-Phase 2 ships the heartbeat, ``refresh_aging`` and ``rescore_worklist``. Later phases add
-``plan_day``, ``dispatch_window``, ``promise_sweep``, ``link_hygiene``, and ``digest`` as plain
+Phase 4 ships the heartbeat, ``refresh_aging``, ``rescore_worklist`` and ``link_hygiene``.
+Later phases add ``plan_day``, ``dispatch_window``, ``promise_sweep`` and ``digest`` as plain
 callables taking ``merchant_id`` (ADR-007 keeps them Celery-portable). Do not add framework
 decorators here.
 """
@@ -113,3 +113,103 @@ def rescore_worklist_all() -> None:
             rescore_worklist(merchant_id)
         except Exception:
             logger.exception("rescore_worklist failed for merchant=%s", merchant_id)
+
+
+def link_hygiene(merchant_id: uuid.UUID) -> None:
+    """Keep payment links in step with their invoices (FR-9.4, FR-9.5).
+
+    Two jobs, both cleanup that a webhook may have missed:
+
+    * **Cancel** links still live on invoices that have settled. Settle deliberately leaves this
+      to us rather than making an outbound HTTP call inside its transaction -- see
+      ``reconciliation/settle.py``. This is the sweep that finishes the work.
+    * **Regenerate** links approaching expiry while the invoice is still unpaid and not stopped.
+      Never for a settled or stopped invoice: handing a fresh link to someone we have permanently
+      stopped contacting is the same class of mistake as messaging them.
+
+    Idempotent. Cancelling an already-cancelled link is a no-op, and regeneration is keyed on
+    ``sha256(invoice_id:amount:purpose)`` so a second run in the same day reuses the link the
+    first run made rather than burning another off the test-mode budget.
+    """
+    from sqlalchemy import select
+
+    from app.enums import PaymentStatus, RecoveryState
+    from app.exceptions import PayvraError
+    from app.models.invoice import Invoice
+    from app.razorpay.client import RazorpayClient
+    from app.razorpay.links import (
+        LinkBudgetExceeded,
+        cancel_link,
+        links_for_invoice,
+        regenerate_if_needed,
+    )
+
+    db = SessionLocal()
+    cancelled = regenerated = 0
+    try:
+        try:
+            client = RazorpayClient()
+        except PayvraError as exc:
+            logger.warning("link_hygiene skipped merchant=%s: %s", merchant_id, exc)
+            return
+
+        settled = db.execute(
+            select(Invoice).where(
+                Invoice.merchant_id == merchant_id,
+                Invoice.payment_status.in_(
+                    (PaymentStatus.PAID.value, PaymentStatus.WRITTEN_OFF.value)
+                ),
+            )
+        ).scalars()
+        for invoice in settled:
+            for link in links_for_invoice(db, invoice.id, live_only=True):
+                if cancel_link(db, client, link):
+                    cancelled += 1
+
+        open_invoices = db.execute(
+            select(Invoice).where(
+                Invoice.merchant_id == merchant_id,
+                Invoice.payment_status.in_(
+                    (PaymentStatus.UNPAID.value, PaymentStatus.PARTIALLY_PAID.value)
+                ),
+                Invoice.recovery_state.not_in(
+                    (RecoveryState.SETTLED.value, RecoveryState.STOPPED.value)
+                ),
+            )
+        ).scalars()
+        for invoice in open_invoices:
+            try:
+                if regenerate_if_needed(db, client, invoice) is not None:
+                    regenerated += 1
+            except LinkBudgetExceeded as exc:
+                # Budget is a demo constraint, not an error. Stop regenerating and leave the rest.
+                logger.warning("link_hygiene stopped regenerating: %s", exc)
+                break
+
+        db.commit()
+        logger.info(
+            "link_hygiene merchant=%s cancelled=%d regenerated=%d",
+            merchant_id,
+            cancelled,
+            regenerated,
+        )
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def link_hygiene_all() -> None:
+    """Fan out :func:`link_hygiene` across every merchant. This is what the 10:00 job runs."""
+    db = SessionLocal()
+    try:
+        merchant_ids = list(db.execute(select(Merchant.id)).scalars())
+    finally:
+        db.close()
+
+    for merchant_id in merchant_ids:
+        try:
+            link_hygiene(merchant_id)
+        except Exception:
+            logger.exception("link_hygiene failed for merchant=%s", merchant_id)

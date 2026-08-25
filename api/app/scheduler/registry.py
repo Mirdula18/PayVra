@@ -20,6 +20,7 @@ from app.scheduler.state import SchedulerState
 HEARTBEAT_JOB_ID = "heartbeat"
 REFRESH_AGING_JOB_ID = "refresh_aging"
 RESCORE_WORKLIST_JOB_ID = "rescore_worklist"
+LINK_HYGIENE_JOB_ID = "link_hygiene"
 
 
 def build_scheduler() -> BackgroundScheduler:
@@ -65,6 +66,18 @@ def register_jobs(scheduler: BackgroundScheduler) -> None:
         hour=1,
         minute=0,
         id=RESCORE_WORKLIST_JOB_ID,
+        replace_existing=True,
+    )
+
+    # FR-9.4/9.5: cancel links on settled invoices, regenerate ones nearing expiry. 10:00 IST --
+    # inside the contact window, so a regenerated link can be used the same morning, and two
+    # hours after it opens so the day's first dispatch has already run.
+    scheduler.add_job(
+        "app.scheduler.jobs:link_hygiene_all",
+        trigger="cron",
+        hour=10,
+        minute=0,
+        id=LINK_HYGIENE_JOB_ID,
         replace_existing=True,
     )
 

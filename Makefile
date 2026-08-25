@@ -3,7 +3,7 @@
 # Postgres and Neon. See ADR-007.
 
 .DEFAULT_GOAL := help
-.PHONY: help install db-up db-down migrate seed seed-reset seed-demo dev web test lint typecheck fmt
+.PHONY: help install db-up db-down migrate seed seed-reset seed-demo dev web test lint typecheck fmt verify-razorpay inspect-webhook tunnel
 
 # --- venv layout differs on Windows vs POSIX ---
 VENV := .venv
@@ -36,6 +36,9 @@ help:
 	@echo "  web         Run the Vite dev server"
 	@echo "  test        Run pytest"
 	@echo "  lint / typecheck / fmt   ruff check / mypy / ruff format"
+	@echo "  verify-razorpay  Probe the LIVE test-mode Razorpay API (creates 1 link)"
+	@echo "  inspect-webhook  Show what a REAL signed webhook delivered"
+	@echo "  tunnel           cloudflared tunnel for local webhook delivery"
 
 install:
 	python -m venv $(VENV)
@@ -80,3 +83,19 @@ typecheck:
 
 fmt:
 	$(RUFF) format api
+
+# Talks to the real Razorpay test API. Creates exactly one payment link and cancels it again,
+# so a repeated run does not eat into the 30-link test-mode cap. --keep leaves it payable.
+verify-razorpay:
+	cd api && ../$(PY) -m scripts.verify_razorpay $(ARGS)
+
+# The inbound half. Run AFTER paying a link: reports what a genuinely Razorpay-signed
+# delivery carried, and whether webhooks.extract reads a real envelope. ARGS="--raw" dumps
+# the full payload (counterparty PII -- do not paste it publicly).
+inspect-webhook:
+	cd api && ../$(PY) -m scripts.inspect_webhook $(ARGS)
+
+# Public HTTPS URL for webhook delivery. Register the printed URL (plus
+# /api/v1/webhooks/razorpay) in the Razorpay Dashboard under Settings -> Webhooks, TEST mode.
+tunnel:
+	cloudflared tunnel --url http://localhost:8000
