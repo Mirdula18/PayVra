@@ -68,18 +68,43 @@ CSV row
               proposes {action, channel, tone_tier, rationale}
   -> validate against tool registry + allowed state transitions
   -> queue as a pending Action with scheduled_for timestamp
-  -> dispatch window: guardrail gate runs 7 checks in order
-       any failure -> log verdict, halt, requeue or stop
-  -> generate message (LLM), validate schema + content policy
-       two failures -> deterministic template
-  -> create Razorpay Payment Link (idempotency key, reference_id = invoice_number)
-  -> send via channel, record Action as executed
+  -> dispatch window, PER ACTION (never batched -- see note below):
+       -> create Razorpay Payment Link (idempotency key, reference_id = invoice_number)
+       -> generate message (LLM), validate schema
+            two failures -> deterministic template
+       -> guardrail gate runs 7 checks in order, including content policy on the draft
+            any failure -> log verdict (outcome=blocked), halt, requeue or stop
+       -> send via channel immediately, then record Action as executed
+            (gate writes outcome=approved; delivery writes outcome=executed after success)
   -> customer opens / replies / pays
   -> inbound reply -> classify -> PTP / dispute / wrong contact / refusal
   -> webhook payment_link.paid -> verify HMAC -> dedupe -> settle
        -> REVOKE all scheduled jobs for this invoice
        -> close open promise, emit recovered event
   -> dashboard aggregates, audit log records everything
+```
+
+**Generate before gate, and gate adjacent to send.** Two ordering constraints, both load-bearing:
+
+*Why generation comes first.* Gate check 6 (content policy) validates banned phrases, the payment
+link, the opt-out mechanism and the outstanding amount — none of which exist until a message is
+drafted. An outbound action reaching the gate with no draft **fails** check 6; it does not pass
+vacuously. Gating first would therefore block every outbound action, always.
+
+*Why the loop is per action, not per batch.* NFR-1.6 budgets under 4s per generation. Generating a
+100-action window in one pass takes ~400s, so verdicts issued at the start would be minutes old by
+the time their sends came round and would expire against the delivery layer's five-minute
+freshness ceiling — failing for timing rather than for policy. Interleaving keeps the gate-to-send
+gap at roughly zero regardless of window size, which is also what makes the gate's freshness
+re-read (check 2) meaningful: it is read immediately before the send it authorises.
+
+```
+for action in claimed_actions:        # SELECT ... FOR UPDATE SKIP LOCKED
+    link    = create_payment_link(action)
+    draft   = generate(action, link)  # ~4s, LLM
+    verdict = gate(db, action)        # all 7 checks; freshness re-read here
+    if not verdict.passed: continue   # already logged as blocked
+    send(action, verdict)             # adjacent to the gate
 ```
 
 ## Trust boundaries
@@ -111,7 +136,7 @@ CSV row
 | LLM proposes an unknown tool | Reject, run deterministic fallback policy, log it |
 | Razorpay API down | Backoff, circuit-break after 5 failures, requeue action |
 | Payment link expired | `link_hygiene` job regenerates if still unpaid |
-| Duplicate webhook delivery | Dedupe on `event.id`, processing is a no-op |
+| Duplicate webhook delivery (expected, per Razorpay) | Dedupe on the `x-razorpay-event-id` header, processing is a no-op |
 | Payment lands while message queued | Freshness check at gate step 2 aborts the send |
 | Email bounces | Contact marked stale, channel switched, AP contact requested |
 | Unhandled exception in send path | Fail **closed** — nothing sends, alert raised |

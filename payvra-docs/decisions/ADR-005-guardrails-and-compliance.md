@@ -25,13 +25,26 @@ all seven always evaluated even after one fails. Every verdict — pass and fail
 | 1 | `time_window` | outside 08:00–19:00 IST |
 | 2 | `freshness` | invoice paid since the proposal was made |
 | 3 | `consent` | channel not permitted, opted out, or quarantined |
-| 4 | `frequency_cap` | >2 touches this week or >6 lifetime |
+| 4 | `frequency_cap` | >2 touches in a **rolling 7 days (IST)**, or >6 lifetime |
 | 5 | `value_threshold` | above merchant threshold, or tier 3+, without approval |
-| 6 | `content_policy` | banned phrase, or missing amount / invoice no. / link / opt-out |
+| 6 | `content_policy` | banned phrase, missing amount / invoice no. / link / opt-out, or **no drafted message at all** |
 | 7 | `stopping_rules` | settled, disputed, opted out, 3 broken promises, cap reached |
 
 The gate contains **no LLM call** and is not bypassable. A failed check halts the action; there is
 no "warn and continue."
+
+**The gate runs after generation, immediately before the send.** Check 6 inspects a drafted
+message, so there is nothing to inspect until one exists — an outbound action arriving with no
+draft fails check 6 rather than passing vacuously. The per-action sequence is
+`create link -> generate -> gate -> send`, interleaved one action at a time rather than batched by
+stage, so the gate-to-send gap stays near zero and check 2's freshness re-read is a statement
+about the moment of sending. See the data-flow note in `architecture/overview.md`.
+
+**A passing gate writes `outcome = approved`, never `executed`.** Passing the gate is
+authorisation, not delivery. If the gate claimed execution, a crash between gate and send would
+leave the audit log asserting a message was sent that never was. The `executed` entry is written
+by the delivery layer after the transport confirms the send. **The audit log may under-claim; it
+may never over-claim.**
 
 ## Rationale
 

@@ -186,8 +186,15 @@ be gentler on its own and must ask permission to be firmer.
 
 ## The gate — seven checks, in order
 
-Runs in the dispatch window, immediately before execution. Ordered so the cheapest and most
-consequential checks run first.
+Runs in the dispatch window, **after the message is generated and immediately before the send**.
+Ordered so the cheapest and most consequential checks run first.
+
+**The gate runs after generation, not before it.** Check 6 inspects a drafted message — banned
+phrases, payment link, opt-out, correct amount — so there is nothing for it to inspect until one
+exists. An outbound action reaching the gate with no draft fails check 6 rather than passing
+vacuously, which means gate-then-generate would block every outbound action. The per-action
+sequence is `create link -> generate -> gate -> send`, one action at a time; see the data-flow
+note in `architecture/overview.md` for why the loop must not be batched.
 
 ```python
 def gate(action: ProposedAction, ctx: ExecutionContext) -> GateVerdict:
@@ -212,11 +219,18 @@ a partial record is a weaker demo and a weaker audit.
 | 3 | `consent` | channel not permitted, opted out, quarantined | drop, log |
 | 4 | `frequency_cap` | >2 touches this week or >6 lifetime | requeue or stop |
 | 5 | `value_threshold` | above threshold or tier 3+ without approval | move to approval queue |
-| 6 | `content_policy` | banned phrase, missing amount / invoice no. / link / opt-out | regenerate once, then template |
+| 6 | `content_policy` | banned phrase, missing amount / invoice no. / link / opt-out, **or no draft at all** | regenerate once, then template |
 | 7 | `stopping_rules` | settled, disputed, opted out, 3 broken promises, cap reached | permanent stop |
 
 Check 2 is the one that saves you from the worst failure mode in this product. Do not skip it
-because "the scheduler just ran."
+because "the scheduler just ran." It re-reads `invoices.payment_status` from the database at gate
+time — never from the action object — which is only meaningful because the gate sits immediately
+before the send.
+
+**A passing gate writes `outcome = approved`, never `executed`.** Passing the gate is
+authorisation, not delivery: a crash between gate and send must not leave the log claiming a
+message went out. The `executed` entry is written by the delivery layer once the transport
+confirms the send. The audit log may under-claim; it may never over-claim.
 
 **Content policy — banned in every generated message:**
 legal threats, credit-rating threats, references to family or personal assets, disclosure to third

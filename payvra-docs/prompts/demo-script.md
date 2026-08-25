@@ -181,3 +181,29 @@ No. Every model call is a hosted inference API call. 1 vCPU, 512 MB.
 - Not showing the blocked-actions view
 - The revoke count not being visible when the payment lands
 - Claiming a DSO improvement without showing it computed
+
+---
+
+## The reconciliation moment — how the number gets on screen
+
+When the payment lands, the webhook returns `{"status": "ok"}` and nothing else. It has to: the
+handler acknowledges in under 200 ms and reconciles asynchronously, so the revoked count does not
+exist yet at the moment it replies.
+
+**The Dashboard polls `GET /invoices/{id}/reconciliation-status`** every second or two after a
+payment is initiated, and renders `revoked_actions` the moment it becomes non-zero. That is the
+beat to hold on stage:
+
+> "The payment just landed. Watch — three queued messages cancelled, in the same transaction as
+> the settlement. Nobody chases a customer who has already paid."
+
+Practical notes for the rehearsal:
+
+- Start polling **when the link is opened**, not when the payment completes — the webhook can
+  arrive before an operator clicks anything.
+- The number appears a beat *after* the payment confirmation screen, not simultaneously. That gap
+  is the asynchronous processing and it is correct; do not try to close it by making the handler
+  synchronous.
+- If the tunnel drops and the webhook never arrives, fall back to
+  `POST /invoices/{id}/mark-paid-offline`, which returns `revoked_actions` **directly in its
+  response** and needs no polling. Worth having on a second tab.

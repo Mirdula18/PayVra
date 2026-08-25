@@ -33,7 +33,7 @@ Violating any of these is a bug, no matter how well the code works.
 3. **Nothing sends outside 08:00–19:00 IST.** Hard-coded window, configurable ceiling only.
 4. **Re-read invoice status immediately before sending.** If it was paid in the interim, abort.
    Chasing someone who already paid is the single worst failure mode this product has.
-5. **All Razorpay writes carry an idempotency key.** All webhook handling dedupes on `event.id`.
+5. **All Razorpay writes carry an idempotency key.** All webhook handling dedupes on the `x-razorpay-event-id` header (the body has no id).
 6. **Webhook signature is verified over the RAW request body**, before any JSON parsing.
 7. **No card data ever touches our servers.** This keeps us out of PCI-DSS scope. Never add
    a field that would store a PAN, CVV, or expiry.

@@ -76,7 +76,7 @@ Every action passes all checks in order. Any failure halts the action and logs t
 | FR-7.1 | **Time window** — only 08:00–19:00 IST; otherwise requeue to the next window | P0 |
 | FR-7.2 | **Freshness** — re-read invoice payment status from DB; abort if settled | P0 |
 | FR-7.3 | **Consent** — channel permitted, opt-out not exercised, not quarantined | P0 |
-| FR-7.4 | **Frequency cap** — max 2 touches/week per counterparty, max 6 per invoice lifecycle | P0 |
+| FR-7.4 | **Frequency cap** — blocks on the 3rd touch in any rolling 7 days per counterparty, and the 7th in an invoice lifetime | P0 |
 | FR-7.5 | **Value threshold** — invoices above a merchant-set amount require human approval | P0 |
 | FR-7.6 | **Tone ceiling** — tier 3+ requires human approval regardless of value | P0 |
 | FR-7.7 | **Content policy** — no threats, no shaming, no third-party disclosure; must contain the correct amount, invoice number, payment link, and opt-out | P0 |
@@ -143,7 +143,7 @@ Every action passes all checks in order. Any failure halts the action and logs t
 | ID | Requirement | Priority |
 |---|---|---|
 | FR-13.1 | Webhook endpoint verifying `X-Razorpay-Signature` over the raw body | P0 |
-| FR-13.2 | Dedupe on `event.id`; processing is idempotent | P0 |
+| FR-13.2 | Dedupe on the `x-razorpay-event-id` header; processing is idempotent | P0 |
 | FR-13.3 | On `payment_link.paid`: mark settled, **revoke all scheduled jobs for that invoice**, close open PTP, emit `recovered` event | P0 |
 | FR-13.4 | On `payment_link.partially_paid`: reduce outstanding, re-enter loop at a *lower* tone tier | P0 |
 | FR-13.5 | On `payment_link.expired`: regenerate if still unpaid and not stopped | P0 |

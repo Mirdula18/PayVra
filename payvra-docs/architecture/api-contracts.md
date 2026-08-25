@@ -314,12 +314,25 @@ No auth header. Verified by `X-Razorpay-Signature`.
 1. Read the **raw** body as bytes
 2. Verify HMAC-SHA256 against the webhook secret
 3. Invalid → `400`, log, stop. Never parse an unverified body.
-4. Insert into `webhook_events` on `razorpay_event_id`; on conflict → `200`, stop
-5. Enqueue for processing
-6. Return `200` — target under 200 ms
+4. Parse, and take the event id from the **`x-razorpay-event-id` header** (case-insensitive).
+   The envelope has no top-level `id`.
+5. Insert into `webhook_events` on `razorpay_event_id`; on conflict → `200`, stop
+6. Enqueue for processing
+7. Return `200` — target under 200 ms
 
 Handled: `payment_link.paid`, `payment_link.partially_paid`, `payment_link.expired`,
 `payment_link.cancelled`, `invoice.paid`, `invoice.partially_paid`, `invoice.expired`
+
+**Never 4xx a verified event.** Razorpay retries a non-2xx indefinitely, so rejecting a genuine
+event is an infinite loop. A verified payload missing the id header is processed under a
+body-derived fallback key (`sha256:<hex>`), which still dedupes because a redelivery carries
+identical bytes.
+
+**Repeat deliveries are expected behaviour**, documented by Razorpay — at-least-once, not a
+malfunction. `{"status": "duplicate"}` is a healthy response and must not raise an alert.
+
+**SLA: a 2XX within 5 seconds.** The 200 ms target above is our own stricter margin, not the
+documented ceiling.
 
 ### `POST /webhooks/inbound/{channel}`
 Inbound replies from email/SMS/WhatsApp providers. Provider-specific signature verification,
@@ -335,6 +348,35 @@ then the same insert-first-process-second pattern.
 ```
 Runs the identical settle path as a webhook: mark settled, **revoke all pending actions**,
 close open promises, write audit entry with `actor: human`.
+
+### `GET /invoices/{id}/reconciliation-status`
+Polled by the Dashboard after a payment lands. Cheap read, safe on a short interval.
+
+```json
+{
+  "invoice_id": "uuid",
+  "settled": true,
+  "settled_at": "2026-08-24T14:22:09+05:30",
+  "revoked_actions": 3,
+  "promises_closed": 1,
+  "payment_status": "paid",
+  "outstanding_paise": 0
+}
+```
+
+**Why this exists.** `revoked_actions` is the demo's central number — the answer to "did you stop
+chasing someone who paid?" — but it cannot be returned by `POST /webhooks/razorpay`. That handler
+must acknowledge in under 200 ms with reconciliation deferred (ADR-006), so at the moment it
+replies the revocation has not happened yet. Reconciling inline to populate the response is
+exactly what turns one payment into a Razorpay retry storm.
+
+So the count reaches the screen by polling. It is read from the `reconcile.settle` audit entry
+rather than recounted from `actions`, because a recount would include actions revoked for
+unrelated reasons (a dispute, a merchant exclusion) and report a number the audit trail does not
+support. The figure on screen is the figure a judge will find in the log.
+
+`payment_status` and `outstanding_paise` are included so a poller can distinguish "not settled
+yet" from "partially paid and still owing" without a second request.
 
 ### `POST /invoices/{id}/mark-disputed`
 ```json

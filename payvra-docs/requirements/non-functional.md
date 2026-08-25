@@ -36,7 +36,7 @@ Razorpay retries on non-2xx; slow handlers cause duplicate deliveries.
 | ID | Requirement |
 |---|---|
 | NFR-3.1 | All Razorpay writes carry an idempotency key |
-| NFR-3.2 | Webhook processing dedupes on `event.id`; replaying an event is a no-op |
+| NFR-3.2 | Webhook processing dedupes on the `x-razorpay-event-id` header; replaying an event is a no-op |
 | NFR-3.3 | Scheduled jobs are idempotent; a double-run must not double-send |
 | NFR-3.4 | Razorpay API failures retry with backoff; circuit-break after 5 consecutive failures |
 | NFR-3.5 | Any unhandled exception in the send path fails **closed** — no message goes out |

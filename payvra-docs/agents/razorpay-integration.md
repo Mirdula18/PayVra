@@ -82,7 +82,18 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"status": "invalid"}, status_code=400)   # 3.
 
     payload = json.loads(raw)                       # 4. only now
-    event_id = payload["id"]
+
+    # 4b. The event id is a HEADER, not a body field. The envelope is
+    #     {entity, account_id, event, contains, payload, created_at} — no top-level "id".
+    #     Header names are case-insensitive; read it that way.
+    event_id = request.headers.get("x-razorpay-event-id", "").strip()
+    if not event_id:
+        # The signature already verified, so this IS from Razorpay. Never 400 here:
+        # Razorpay retries a non-2xx forever, so rejecting a valid event is an infinite
+        # loop. Degrade to a body-derived key — a redelivery carries identical bytes,
+        # so it still dedupes.
+        log.warning("verified webhook carried no x-razorpay-event-id; using fallback key")
+        event_id = "sha256:" + hashlib.sha256(raw).hexdigest()
 
     try:                                            # 5. insert-first dedupe
         db.execute(insert(WebhookEvent).values(
@@ -111,6 +122,20 @@ The unique constraint on `webhook_events.razorpay_event_id` **is** the dedupe me
 Do not implement dedupe in application logic — race conditions will defeat it.
 
 Razorpay retries on non-2xx and on slow responses. Acknowledge fast, process async, always.
+
+**The event id is a header.** `x-razorpay-event-id`, unique per event, is what Razorpay documents
+as the value to deduplicate on. The body has no top-level `id`, so `payload["id"]` is empty on
+every genuine delivery. An earlier draft of this file showed exactly that, and it would have
+400'd every real event into an infinite retry loop.
+
+**Duplicates are expected, by design.** Razorpay states that the same event may be delivered more
+than once — at-least-once delivery, not a malfunction. A `{"status": "duplicate"}` response is a
+healthy outcome: never alert on it, never count it as an error rate. The constraint absorbing a
+redelivery is the system working.
+
+**The real SLA is a 2XX within 5 seconds.** Our 200 ms target is a self-imposed margin about 25x
+stricter and it stays — it is what keeps the async design honest. But 200 ms is not the hard
+requirement: do not trade correctness to defend it, and do not read a 280 ms p99 as an outage.
 
 ---
 
@@ -187,14 +212,29 @@ cloudflared tunnel --url http://localhost:8000
 ```
 
 Test-mode and live-mode webhook secrets are **different**. Using the wrong one produces signature
-failures that look like an attack. Check this first when webhooks stop verifying.
+failures that look like an attack. Check this first when webhooks stop verifying. So is the
+webhook secret different from the API key secret — it is a string *you* choose in the webhook
+form, and confusing the two produces the identical symptom.
+
+**Full procedure: [`runbooks/razorpay-live-verification.md`](../runbooks/razorpay-live-verification.md).**
+It covers test keys, the tunnel, webhook registration, and a diagnostic table for "nothing
+arrived". Two commands back it:
+
+```bash
+make verify-razorpay          # outbound: field shape, reference_id, notes, reference reuse
+make inspect-webhook          # inbound: what a REAL signed delivery carried
+```
+
+Everything in this module was built against a stub. Run both before Phase 5 — a wrong assumption
+here is Phase 4 rework, and rehearsal is the worst time to find it.
 
 ---
 
 ## Testing priorities
 
 1. Signature verification: valid passes, tampered body fails, wrong secret fails
-2. Duplicate `event.id` is a no-op returning 200
+2. A repeated `x-razorpay-event-id` header is a no-op returning 200, and a verified payload with
+   no such header still processes (fallback key) rather than 400-ing
 3. `settle_invoice` revokes every pending action, in one transaction
 4. Partial payment reduces outstanding and lowers tone tier
 5. Expired link regenerates only when unpaid and not stopped

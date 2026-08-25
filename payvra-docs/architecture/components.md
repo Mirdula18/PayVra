@@ -175,7 +175,7 @@ Confidence below `REPLY_CONFIDENCE_THRESHOLD` routes to the human queue. Never g
 
 ```
 reconciliation/
-  handler.py        webhook event dispatch, dedupe on event.id
+  handler.py        webhook event dispatch, dedupe on x-razorpay-event-id header
   settle.py         mark paid, revoke scheduled jobs, close promises
   manual.py         "mark paid offline"
 ```

@@ -126,3 +126,29 @@ Manual is fine here, but verify:
 3. Money formatting across ₹1,200 / ₹4.2L / ₹1.4Cr
 4. Pause visibly halts and is obvious while active
 5. The whole demo path works at 1920×1080 on a projector — test the actual resolution
+
+---
+
+## Phase 8 requirement: the reconciliation poll
+
+**`GET /invoices/{id}/reconciliation-status` exists and the Dashboard must poll it.** Built in
+Phase 4 specifically so this is not discovered during rehearsal.
+
+```ts
+// Poll from the moment a payment link is opened, not from payment completion:
+// the webhook can arrive before an operator clicks anything.
+useQuery({
+  queryKey: ["reconciliation", invoiceId],
+  queryFn: () => api.get(`/invoices/${invoiceId}/reconciliation-status`),
+  refetchInterval: (data) => (data?.settled ? false : 1500),  // stop once settled
+})
+```
+
+Render `revoked_actions` prominently the moment it becomes non-zero — it is the demo's central
+number and the single most persuasive thing on the screen. `settled_at` tells you when to stop
+polling; `payment_status` distinguishes a partial payment from an unsettled one.
+
+**Do not expect this number from the webhook response.** `POST /webhooks/razorpay` returns
+`{"status": "ok"}` and cannot do otherwise: it acknowledges in under 200 ms with reconciliation
+deferred, so the count does not exist when it replies. The gap between the payment confirmation
+and the number appearing is the asynchronous processing, and it is correct.
