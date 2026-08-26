@@ -211,10 +211,16 @@ def _match_invoice(db: Session, facts: webhooks.WebhookFacts) -> Invoice | None:
 
     if facts.reference_id:
         # invoice_number is unique per merchant, not globally; a bare reference_id can only be
-        # trusted when it resolves to exactly one row.
+        # trusted when it resolves to exactly one row. The suffix is stripped first: a regenerated
+        # link carries "INV-001-R2", and this fallback exists precisely for the case where the
+        # link row and notes.invoice_id have both failed us.
+        from app.razorpay.links import base_reference_id
+
         matches = list(
             db.execute(
-                select(Invoice).where(Invoice.invoice_number == facts.reference_id).limit(2)
+                select(Invoice)
+                .where(Invoice.invoice_number == base_reference_id(facts.reference_id))
+                .limit(2)
             ).scalars()
         )
         if len(matches) == 1:

@@ -21,9 +21,12 @@ from app.razorpay.links import (
     RAZORPAY_TEST_MODE_LINK_CAP,
     LinkBudgetExceeded,
     LinkPurpose,
+    base_reference_id,
     build_payload,
     create_link,
     links_used,
+    next_reference_id,
+    notify_link,
     regenerate_if_needed,
 )
 
@@ -69,23 +72,73 @@ def test_notify_and_reminder_enable_are_both_false(
         amount_paise=100_000,
         expire_by=datetime.now(UTC) + timedelta(days=7),
         accept_partial=False,
+        reference_id=gate_invoice.invoice_number,
     )
     assert payload["notify"] == {"sms": False, "email": False}
     assert payload["reminder_enable"] is False
 
 
-def test_reference_id_is_always_the_invoice_number(
+def test_the_payload_sends_the_reference_id_it_was_given(
     db_session: Session, gate_invoice: Invoice
 ) -> None:
-    """THE reconciliation key: it turns a matching problem into one indexed lookup (ADR-006)."""
+    """THE reconciliation key: it turns a matching problem into one indexed lookup (ADR-006).
+
+    Passed in rather than derived, because uniqueness is Razorpay-enforced and must be decided in
+    exactly one place -- :func:`next_reference_id`.
+    """
     payload = build_payload(
         gate_invoice,
         None,
         amount_paise=100_000,
         expire_by=datetime.now(UTC) + timedelta(days=7),
         accept_partial=False,
+        reference_id=f"{gate_invoice.invoice_number}-R2",
     )
-    assert payload["reference_id"] == gate_invoice.invoice_number
+    assert payload["reference_id"] == f"{gate_invoice.invoice_number}-R2"
+
+
+def test_the_first_link_carries_the_bare_invoice_number(
+    db_session: Session, gate_invoice: Invoice
+) -> None:
+    """The common case stays clean -- this is the value a merchant recognises on a dashboard."""
+    assert next_reference_id(db_session, gate_invoice) == gate_invoice.invoice_number
+
+
+def test_each_regenerated_link_gets_a_distinct_reference_id(
+    db_session: Session, gate_invoice: Invoice
+) -> None:
+    """Razorpay 400s on a duplicate reference_id, which would break FR-9.4 link regeneration.
+
+    Found by scripts/verify_razorpay against the live API: the stubbed transport accepted the
+    duplicate happily, so only a real call could catch it.
+    """
+    client = make_client()
+    first = create_link(db_session, client, gate_invoice, amount_paise=100_000)
+    second = create_link(db_session, client, gate_invoice, amount_paise=50_000)
+    third = create_link(db_session, client, gate_invoice, amount_paise=25_000)
+
+    references = [first.link.reference_id, second.link.reference_id, third.link.reference_id]
+    assert references == [
+        gate_invoice.invoice_number,
+        f"{gate_invoice.invoice_number}-R2",
+        f"{gate_invoice.invoice_number}-R3",
+    ]
+    assert len(set(references)) == 3, "a reused reference_id is a 400 from Razorpay"
+
+
+def test_a_regenerated_reference_still_resolves_to_its_invoice(
+    db_session: Session, gate_invoice: Invoice
+) -> None:
+    """Reconciliation's last-resort fallback must see through the suffix.
+
+    An unmatched webhook is money received and not recorded, so the suffix must not cost us the
+    third matching route.
+    """
+    assert base_reference_id(f"{gate_invoice.invoice_number}-R2") == gate_invoice.invoice_number
+    assert base_reference_id(f"{gate_invoice.invoice_number}-R17") == gate_invoice.invoice_number
+    # An invoice number is free to contain a hyphen and an R; only a trailing -R<digits> is ours.
+    assert base_reference_id("INV-2026-R") == "INV-2026-R"
+    assert base_reference_id("INV-R2-0044") == "INV-R2-0044"
 
 
 def test_notes_carry_our_internal_ids(db_session: Session, gate_invoice: Invoice) -> None:
@@ -96,6 +149,7 @@ def test_notes_carry_our_internal_ids(db_session: Session, gate_invoice: Invoice
         amount_paise=100_000,
         expire_by=datetime.now(UTC) + timedelta(days=7),
         accept_partial=False,
+        reference_id=gate_invoice.invoice_number,
     )
     assert payload["notes"] == {
         "invoice_id": str(gate_invoice.id),
@@ -123,6 +177,7 @@ def test_the_payload_carries_the_contact_but_no_card_field(
         amount_paise=100_000,
         expire_by=datetime.now(UTC) + timedelta(days=7),
         accept_partial=False,
+        reference_id=gate_invoice.invoice_number,
     )
     assert payload["customer"] == {
         "name": "Ravi Kumar",
@@ -288,6 +343,52 @@ def test_an_invoice_with_no_live_link_is_left_alone(
     """Nothing to regenerate. Creating one here would be issuing a link nobody asked for."""
     _add_link(db_session, gate_invoice, expires_in=timedelta(hours=1), status="expired")
     assert regenerate_if_needed(db_session, make_client(), gate_invoice) is None
+
+
+# --- notify (FR-9.3) --------------------------------------------------------------------------
+
+
+def _notify_client(calls: list[tuple[str, str]]) -> RazorpayClient:
+    """A client recording (method, path) so the notify route can be asserted exactly."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json={"success": True})
+
+    client = RazorpayClient(key_id="rzp_test_x", key_secret="s")
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.razorpay.test/v1"
+    )
+    return client
+
+
+def test_notify_link_hits_the_razorpay_notify_route(
+    db_session: Session, gate_invoice: Invoice
+) -> None:
+    """FR-9.3: resending an existing link must reuse it, never create a second one.
+
+    A create here would silently burn test-mode budget on every follow-up message, which is the
+    difference between a demo that survives its dunning sequence and one that dies at link 30.
+    """
+    link = _add_link(db_session, gate_invoice, expires_in=timedelta(days=7))
+    calls: list[tuple[str, str]] = []
+
+    notify_link(_notify_client(calls), link, "email")
+
+    assert calls == [("POST", f"/v1/payment_links/{link.razorpay_link_id}/notify_by/email")]
+
+
+def test_notify_link_refuses_a_medium_razorpay_does_not_support(
+    db_session: Session, gate_invoice: Invoice
+) -> None:
+    """WhatsApp is not a notify_by medium. Failing loudly beats a silent non-delivery."""
+    link = _add_link(db_session, gate_invoice, expires_in=timedelta(days=7))
+    calls: list[tuple[str, str]] = []
+
+    with pytest.raises(ValueError, match="sms or email"):
+        notify_link(_notify_client(calls), link, "whatsapp")
+
+    assert calls == [], "an invalid medium must not reach Razorpay"
 
 
 def test_link_hygiene_job_is_registered_at_1000_daily() -> None:

@@ -19,13 +19,16 @@ It asserts, against real responses:
 It also prints the exact webhook payload shape a real event carries, which is the fifth thing to
 confirm: that ``webhooks.extract`` reads a real envelope, not the one our fixtures invent.
 
-**Creates exactly one payment link**, against the test-mode budget of 30. It cancels it again at
+**Creates two payment links**, against the test-mode budget of 30: the main probe, plus one
+carrying a ``-R2`` suffix to prove FR-9.4 regeneration works. The duplicate-reference attempt in
+check 4 is refused by Razorpay and creates nothing. It cancels them again at
 the end unless ``--keep`` is passed, so a repeated run does not eat the budget.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from datetime import timedelta
@@ -39,6 +42,7 @@ from app.razorpay.client import (
     RazorpayError,
     idempotency_key,
 )
+from app.razorpay.links import REGENERATION_SUFFIX
 from app.razorpay.webhooks import extract
 
 DIVIDER = "=" * 78
@@ -215,30 +219,13 @@ def verify_fetch(client: RazorpayClient, link_id: str, checks: Checks) -> None:
     print("  (any future expiry, any CVV) to make Razorpay send a real payment_link.paid.")
 
 
-def verify_duplicate_reference(client: RazorpayClient, checks: Checks) -> None:
-    """Can two links carry the same ``reference_id``? FR-9.4 silently depends on yes.
-
-    ``links.py`` sets ``reference_id`` to ``invoice.invoice_number`` on *every* link, and
-    ``regenerate_if_needed`` creates a **second** link for the same invoice when the first nears
-    expiry. Different idempotency key, same reference_id. If Razorpay enforces reference_id
-    uniqueness per account -- and it is documented as a unique identifier -- then regeneration
-    4xxs against the real API and FR-9.4 has never worked outside our stubs.
-
-    A 4xx here is a genuine finding, not a script failure. It creates a second link only if
-    Razorpay permits one; that link is cancelled immediately either way.
-    """
-    print()
-    print(DIVIDER)
-    print("4 -- is reference_id reusable? (FR-9.4 link regeneration depends on it)")
-    print(DIVIDER)
-
-    amount = 101_00  # differs from the first probe, so only reference_id is being tested
-    payload = {
+def _probe_payload(reference: str, amount: int, label: str) -> dict[str, Any]:
+    return {
         "amount": amount,
         "currency": "INR",
         "accept_partial": False,
-        "reference_id": PROBE_REFERENCE,  # deliberately the SAME as the first link
-        "description": "PAYVRA regeneration probe -- safe to cancel",
+        "reference_id": reference,
+        "description": f"PAYVRA {label} probe -- safe to cancel",
         "customer": {"name": "PAYVRA Probe"},
         "notify": {"sms": False, "email": False},
         "reminder_enable": False,
@@ -246,29 +233,84 @@ def verify_duplicate_reference(client: RazorpayClient, checks: Checks) -> None:
         "notes": {"invoice_id": PROBE_INVOICE_ID, "merchant_id": PROBE_MERCHANT_ID},
     }
 
+
+def verify_duplicate_reference(client: RazorpayClient, checks: Checks) -> None:
+    """FR-9.4 regeneration: a reused ``reference_id`` is rejected, a suffixed one is accepted.
+
+    **This check found a real bug.** ``links.py`` originally set ``reference_id`` to
+    ``invoice.invoice_number`` on *every* link, while ``regenerate_if_needed`` creates a second
+    link for the same invoice when the first nears expiry. Razorpay enforces ``reference_id``
+    uniqueness per account, so regeneration 400'd against the real API while passing happily
+    against our stubbed transport. ``next_reference_id`` now suffixes regenerations ``-R2``,
+    ``-R3``, and reconciliation strips the suffix on its fallback route.
+
+    Both halves are asserted here, so this stays a regression guard rather than a one-off finding:
+
+    1. **The constraint still exists.** A duplicate must be refused. If Razorpay ever dropped this,
+       the suffix would become unnecessary rather than wrong -- worth knowing, not urgent.
+    2. **The fix works live.** A suffixed reference must be accepted, which is the thing that was
+       actually broken.
+
+    Creates one link (the suffixed one) and cancels it. The duplicate attempt creates nothing.
+    """
+    print()
+    print(DIVIDER)
+    print("4 -- reference_id uniqueness (FR-9.4 link regeneration)")
+    print(DIVIDER)
+
+    # 1. The duplicate must be refused. Amount differs, so only reference_id is under test.
     try:
         response = client.create_payment_link(
-            payload, idempotency=idempotency_key(PROBE_INVOICE_ID, amount, "regeneration")
+            _probe_payload(PROBE_REFERENCE, 101_00, "duplicate-reference"),
+            idempotency=idempotency_key(PROBE_INVOICE_ID, 101_00, "regeneration"),
         )
     except RazorpayClientError as exc:
         checks.check(
-            False,
-            "a second link may reuse an existing reference_id",
-            f"Razorpay {exc.status_code} code={exc.code}: {exc}\n"
-            "         REWORK: regenerate_if_needed() cannot reuse invoice_number. Suffix it\n"
-            "         (e.g. INV-001-R2) and match the webhook on the prefix, or drop back to\n"
-            "         notes.invoice_id as the reconciliation key for regenerated links.",
+            True,
+            "a reused reference_id is refused, as next_reference_id assumes",
+            f"Razorpay {exc.status_code} code={exc.code} -- expected, and why we suffix",
         )
-        return
     except RazorpayError as exc:
         checks.check(False, "duplicate-reference probe completed", str(exc))
+        return
+    else:
+        checks.check(
+            False,
+            "a reused reference_id is refused, as next_reference_id assumes",
+            f"Razorpay ACCEPTED a duplicate (link {response.get('id')}). The uniqueness "
+            "constraint appears to have been relaxed; the -R suffix is now belt-and-braces "
+            "rather than required. Not urgent, but links.py's docstring is out of date.",
+        )
+        if response.get("id"):
+            with contextlib.suppress(RazorpayError):
+                client.cancel(str(response["id"]))
+
+    # 2. The suffixed reference -- what regeneration actually sends now -- must be accepted.
+    suffixed = f"{PROBE_REFERENCE}{REGENERATION_SUFFIX}2"
+    try:
+        response = client.create_payment_link(
+            _probe_payload(suffixed, 102_00, "regeneration"),
+            idempotency=idempotency_key(PROBE_INVOICE_ID, 102_00, "regeneration-suffixed"),
+        )
+    except RazorpayError as exc:
+        checks.check(
+            False,
+            "a suffixed reference_id is accepted (FR-9.4 regeneration works)",
+            f"{exc}\n         The regeneration fix does not work against the live API.",
+        )
         return
 
     checks.check(
         True,
-        "a second link may reuse an existing reference_id",
-        f"regeneration is safe; second link {response.get('id')}",
+        "a suffixed reference_id is accepted (FR-9.4 regeneration works)",
+        f"sent {suffixed!r}, link {response.get('id')}",
     )
+    checks.check(
+        str(response.get("reference_id")) == suffixed,
+        "the suffixed reference survives the round trip",
+        f"got {response.get('reference_id')!r}",
+    )
+
     if response.get("id"):
         try:
             client.cancel(str(response["id"]))

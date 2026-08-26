@@ -1,7 +1,18 @@
 """Payment link lifecycle: create, notify, cancel, regenerate (FR-9).
 
-``reference_id`` is always the merchant's invoice number. That single choice is what turns
-reconciliation from a matching problem into one indexed lookup when the webhook arrives (ADR-006).
+``reference_id`` carries the merchant's invoice number, which is what turns reconciliation from a
+matching problem into one indexed lookup when the webhook arrives (ADR-006).
+
+**It cannot be the bare invoice number on every link, though.** Razorpay enforces uniqueness on
+``reference_id`` per account and rejects a reuse with ``400 BAD_REQUEST_ERROR``. The first link for
+an invoice therefore carries the clean invoice number; each regeneration (FR-9.4) carries a
+``-R2``, ``-R3``, ... suffix -- see :func:`next_reference_id`. This was found by
+``scripts/verify_razorpay`` against the live test API, after the stubbed transport had happily
+accepted the duplicate; the runbook exists for exactly this class of wrong assumption.
+
+Reconciliation is unaffected by the suffix. ``_match_invoice`` resolves the stored link row first
+and ``notes.invoice_id`` second, both of which are exact regardless of reference, and its
+``reference_id`` fallback strips the suffix before matching.
 
 **Test-mode link budget.** Razorpay caps standard Payment Links at 30 per business in test mode,
 and that cap is what the demo runs on. Four things keep us under it:
@@ -21,6 +32,7 @@ and that cap is what the demo runs on. Four things keep us under it:
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -58,6 +70,13 @@ MIN_EXPIRY_MINUTES = 20
 # Link states that mean the link can still take money.
 LIVE_LINK_STATUSES = ("created", "partially_paid")
 
+# Separates the invoice number from the regeneration counter in a reference_id (FR-9.4).
+REGENERATION_SUFFIX = "-R"
+
+# Only a trailing "-R" plus digits is a suffix we generated. Anchored so an invoice number that
+# legitimately ends in something like "-R" without a counter is left alone.
+_REGENERATION_RE = re.compile(rf"{re.escape(REGENERATION_SUFFIX)}\d+$")
+
 
 class LinkPurpose(StrEnum):
     """Part of the idempotency key, so it is what distinguishes "the same link" from a new one."""
@@ -93,6 +112,42 @@ def links_used(db: Session, merchant_id: uuid.UUID) -> int:
     )
 
 
+def next_reference_id(db: Session, invoice: Invoice) -> str:
+    """The ``reference_id`` for the next link on this invoice. Unique per link, per FR-9.4.
+
+    Razorpay rejects a duplicate ``reference_id`` outright, so the first link carries the bare
+    invoice number and every subsequent one is suffixed ``-R2``, ``-R3``, and so on. The first
+    link keeps the clean number deliberately: that is the value a merchant recognises on a
+    Razorpay dashboard row, and the common case should not be made ugly to accommodate the rare
+    one.
+
+    Numbered from the count of links already stored for the invoice rather than from a parsed
+    suffix, because the count is what the unique index actually protects. A create that fails at
+    Razorpay writes no row, so the next attempt recomputes the same reference and retries cleanly.
+    """
+    existing = int(
+        db.execute(
+            select(func.count())
+            .select_from(PaymentLink)
+            .where(PaymentLink.invoice_id == invoice.id)
+        ).scalar_one()
+    )
+    if existing == 0:
+        return invoice.invoice_number
+    return f"{invoice.invoice_number}{REGENERATION_SUFFIX}{existing + 1}"
+
+
+def base_reference_id(reference_id: str) -> str:
+    """Strip a ``-R<n>`` regeneration suffix, returning the invoice number underneath.
+
+    Used by reconciliation's last-resort fallback so a regenerated link still resolves when the
+    link row and ``notes.invoice_id`` are both unavailable. Anything not matching the suffix shape
+    is returned untouched -- an invoice number is free to contain a hyphen and an R, and only a
+    trailing ``-R`` followed by digits is ours.
+    """
+    return _REGENERATION_RE.sub("", reference_id)
+
+
 def _primary_contact(db: Session, invoice: Invoice) -> Contact | None:
     return db.execute(
         select(Contact)
@@ -109,6 +164,7 @@ def build_payload(
     amount_paise: int,
     expire_by: datetime,
     accept_partial: bool,
+    reference_id: str,
 ) -> dict[str, object]:
     """The exact create-link body from agents/razorpay-integration.md.
 
@@ -132,7 +188,9 @@ def build_payload(
         "currency": "INR",
         "accept_partial": accept_partial,
         # THE reconciliation key. Carries the merchant's invoice number through to the webhook.
-        "reference_id": invoice.invoice_number,
+        # Required rather than derived here: Razorpay rejects a duplicate, so uniqueness is
+        # decided once by next_reference_id() and a caller must not be able to skip that.
+        "reference_id": reference_id,
         "description": f"Invoice {invoice.invoice_number}",
         "customer": customer,
         "notify": {"sms": False, "email": False},
@@ -191,12 +249,14 @@ def create_link(
     if expiry < minimum:
         expiry = minimum
 
+    reference = next_reference_id(db, invoice)
     payload = build_payload(
         invoice,
         _primary_contact(db, invoice),
         amount_paise=amount,
         expire_by=expiry,
         accept_partial=accept_partial,
+        reference_id=reference,
     )
     response = client.create_payment_link(payload, idempotency=key)
 
@@ -206,7 +266,9 @@ def create_link(
         razorpay_link_id=str(response["id"]),
         short_url=str(response.get("short_url", "")),
         amount_paise=amount,
-        reference_id=invoice.invoice_number,
+        # Store what was actually sent, not the invoice number: reconciliation's fallback
+        # compares against this row, so a drift here would silently unmatch a regenerated link.
+        reference_id=reference,
         status=str(response.get("status", "created")),
         expire_by=expiry,
         accept_partial=accept_partial,
