@@ -15,9 +15,24 @@ Use **LiteLLM** as an abstraction layer over multiple free-tier providers:
 
 | Job | Provider | Model | Why |
 |---|---|---|---|
-| Reply classification, date extraction, action proposal | Groq | `llama-3.3-70b-versatile` | Fast, published limits (30 RPM, 1,000 RPD, 12K TPM, 100K TPD), good structured output |
-| Message drafting | Google Gemini (AI Studio) | Gemini Flash | Best free-tier Indic and code-mixed language handling; no credit card |
+| Reply classification, date extraction, action proposal | Groq | `openai/gpt-oss-20b` | Fast, published limits (30 RPM, 1,000 RPD, 12K TPM, 100K TPD), good structured output |
+| Message drafting | Google Gemini (AI Studio) | `gemini-3.6-flash` | Best free-tier Indic and code-mixed language handling; no credit card |
 | Fallback | OpenRouter | `:free` variants | 20 RPM, 50 RPD until $10 credits purchased |
+
+**The provider split is the decision; the model ids are not.** Both originals
+(`llama-3.3-70b-versatile`, `gemini-2.0-flash`) were retired by their providers and every call
+404'd — which the template fallback swallowed, so the system looked healthy while never once
+reaching a model. Model ids are expected to churn: `scripts/verify_llm` exists to catch it, and
+the table above records what was last verified working rather than what was chosen at design time.
+
+Two consequences of that episode are now load-bearing, both in `generation/llm.py`:
+
+* **Each job falls back across providers**, not just to OpenRouter. One provider having a bad
+  afternoon should not cost us a job when another configured key would serve it.
+* **Thinking is disabled** (`reasoning_effort="none"`). Current flagship models spend the token
+  budget on internal reasoning before emitting anything; `gemini-3.6-flash` at `max_tokens=1080`
+  returned `finish_reason='length'` with `completion_tokens=1076` and an empty body. Every job
+  here is short structured output, not a reasoning problem.
 
 **No GPU anywhere in the stack.** Every model call is a hosted inference API call over HTTPS.
 The backend runs in 1 vCPU / 512 MB.

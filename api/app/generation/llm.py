@@ -63,19 +63,66 @@ class LLMJob(StrEnum):
     PROPOSAL = "proposal"
 
 
-# ADR-003's routing table. Ordered: primary first, then the OpenRouter free-tier fallback.
-# Splitting by job is the whole point -- classification needs speed and structured output (Groq),
-# drafting needs Hinglish fluency (Gemini).
-_GROQ = "groq/llama-3.3-70b-versatile"
-_GEMINI = "gemini/gemini-2.0-flash"
+# ADR-003's routing table. Splitting by job is the whole point -- classification needs speed and
+# structured output (Groq), drafting needs Hinglish fluency (Gemini).
+#
+# **Model ids go stale, and a stale id is indistinguishable from an outage at the call site.**
+# The originals here (llama-3.3-70b-versatile, gemini-2.0-flash) were both retired by their
+# providers; every drafting call fell back to a template, which is exactly the degradation the
+# fallback is designed to hide. Verified working by scripts/verify_llm -- re-run it when a
+# provider deprecates something, and prefer whatever the provider's own 404 recommends.
+_GROQ = "groq/openai/gpt-oss-20b"
+_GEMINI = "gemini/gemini-3.6-flash"
 _OPENROUTER = "openrouter/meta-llama/llama-3.3-70b-instruct:free"
 
+# Each job falls back across *providers*, not just to OpenRouter. One provider having a bad
+# afternoon is the common case, and a Groq outage should not cost us classification when a working
+# Gemini key is sitting right there. OpenRouter stays last: free tier, slowest, most rate-limited.
 MODEL_ROUTES: dict[LLMJob, tuple[str, ...]] = {
-    LLMJob.DRAFTING: (_GEMINI, _OPENROUTER),
-    LLMJob.CLASSIFICATION: (_GROQ, _OPENROUTER),
-    LLMJob.EXTRACTION: (_GROQ, _OPENROUTER),
-    LLMJob.PROPOSAL: (_GROQ, _OPENROUTER),
+    LLMJob.DRAFTING: (_GEMINI, _GROQ, _OPENROUTER),
+    LLMJob.CLASSIFICATION: (_GROQ, _GEMINI, _OPENROUTER),
+    LLMJob.EXTRACTION: (_GROQ, _GEMINI, _OPENROUTER),
+    LLMJob.PROPOSAL: (_GROQ, _GEMINI, _OPENROUTER),
 }
+
+# litellm reads provider credentials from os.environ, but ours live in .env and are loaded by
+# pydantic-settings into `settings` -- they never reach the environment. Passing api_key
+# explicitly is what closes that gap; without it every call is an AuthenticationError no matter
+# how valid the key in .env is.
+_PROVIDER_KEYS: tuple[tuple[str, str], ...] = (
+    ("groq/", "groq_api_key"),
+    ("gemini/", "gemini_api_key"),
+    ("openrouter/", "openrouter_api_key"),
+)
+
+
+# Current flagship models are reasoning models, and they spend the token budget on internal
+# thinking *before* emitting anything. gemini-3.6-flash given max_tokens=1080 returned
+# finish_reason='length' with completion_tokens=1076 and content=None -- an empty draft that
+# looked exactly like a provider outage and fell back to a template every single time.
+#
+# Every job here is short structured output, not a reasoning problem: draft a dunning message,
+# classify a reply, extract a date. Turning thinking off makes the same call return clean JSON in
+# ~200 tokens instead of burning 1076 on deliberation. Providers that do not understand the
+# parameter drop it (see DROP_UNSUPPORTED_PARAMS) rather than erroring.
+DEFAULT_REASONING_EFFORT = "none"
+
+# litellm raises on a parameter a provider does not support. Our routes span three providers with
+# different capabilities, so a param meant for one must not break the fallback to another.
+DROP_UNSUPPORTED_PARAMS = True
+
+
+def api_key_for(model: str) -> str | None:
+    """The configured key for this model's provider, or None if it is a placeholder.
+
+    Returning None rather than the placeholder lets the route be skipped cleanly instead of
+    burning three retries on a credential that was never going to work.
+    """
+    for prefix, attribute in _PROVIDER_KEYS:
+        if model.startswith(prefix):
+            key = str(getattr(settings, attribute, "") or "")
+            return key if key and not key.startswith("dummy") else None
+    return None
 
 
 class LLMUnavailable(PayvraError):
@@ -276,6 +323,7 @@ def complete(
     temperature: float = 0.4,
     max_tokens: int = 800,
     response_format: dict[str, Any] | None = None,
+    reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
 ) -> LLMResponse:
     """One completion, with routing, retry, breaker and accounting.
 
@@ -303,6 +351,8 @@ def complete(
         # Not a failure worth tripping the breaker: the package will not appear on a retry.
         raise LLMUnavailable(f"litellm is not installed: {exc}") from exc
 
+    litellm.drop_params = DROP_UNSUPPORTED_PARAMS
+
     messages: list[dict[str, str]] = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -310,16 +360,24 @@ def complete(
 
     last_error: Exception | None = None
     for model in MODEL_ROUTES[job]:
+        key = api_key_for(model)
+        if key is None:
+            # No usable credential. Skipping is not a failure worth retrying or tripping the
+            # breaker over -- a missing key will not appear between attempts.
+            logger.debug("skipping %s for %s: no API key configured", model, job.value)
+            continue
         for attempt in range(1, MAX_ATTEMPTS + 1):
             started = time.perf_counter()
             try:
                 response = litellm.completion(
                     model=model,
                     messages=messages,
+                    api_key=key,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     timeout=REQUEST_TIMEOUT_SECONDS,
                     **({"response_format": response_format} if response_format else {}),
+                    **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
                 )
             except Exception as exc:  # noqa: BLE001 - litellm raises a wide provider-specific tree
                 last_error = exc

@@ -3,7 +3,7 @@
 # Postgres and Neon. See ADR-007.
 
 .DEFAULT_GOAL := help
-.PHONY: help install db-up db-down migrate seed seed-reset seed-demo dev web test lint typecheck fmt verify-razorpay inspect-webhook tunnel
+.PHONY: help install db-up db-down migrate seed seed-reset seed-demo dev web test lint typecheck fmt verify-razorpay inspect-webhook demo-link verify-llm tunnel
 
 # --- venv layout differs on Windows vs POSIX ---
 VENV := .venv
@@ -36,8 +36,10 @@ help:
 	@echo "  web         Run the Vite dev server"
 	@echo "  test        Run pytest"
 	@echo "  lint / typecheck / fmt   ruff check / mypy / ruff format"
-	@echo "  verify-razorpay  Probe the LIVE test-mode Razorpay API (creates 1 link)"
+	@echo "  verify-razorpay  Probe the LIVE test-mode Razorpay API (creates 2 links)"
 	@echo "  inspect-webhook  Show what a REAL signed webhook delivered"
+	@echo "  demo-link        Create a REAL payable link on a REAL seeded invoice"
+	@echo "  verify-llm       Draft against a REAL model and validate the output"
 	@echo "  tunnel           cloudflared tunnel for local webhook delivery"
 
 install:
@@ -94,6 +96,18 @@ verify-razorpay:
 # the full payload (counterparty PII -- do not paste it publicly).
 inspect-webhook:
 	cd api && ../$(PY) -m scripts.inspect_webhook $(ARGS)
+
+# Creates a REAL payment link on a REAL seeded invoice and leaves it payable, so the
+# reconciliation loop can be proven before the Phase 6 agent exists to create links itself.
+# ARGS="--invoice INV-2026-1020" picks one; default is the highest-priority unpaid.
+demo-link:
+	cd api && ../$(PY) -m scripts.create_demo_link $(ARGS)
+
+# The drafting half. Proves a REAL model returns parseable, validating JSON -- the thing every
+# monkeypatched test cannot. Needs GROQ_API_KEY or GEMINI_API_KEY and LLM_ENABLED=true.
+# ARGS="--show" prints each drafted message in full.
+verify-llm:
+	cd api && ../$(PY) -m scripts.verify_llm $(ARGS)
 
 # Public HTTPS URL for webhook delivery. Register the printed URL (plus
 # /api/v1/webhooks/razorpay) in the Razorpay Dashboard under Settings -> Webhooks, TEST mode.

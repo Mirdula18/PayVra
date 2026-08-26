@@ -177,6 +177,18 @@ def parse_draft(raw: str, ctx: MessageContext) -> GeneratedMessage:
     )
 
 
+# Floor under the per-channel budget. words*6 is ample for the JSON itself, but an SMS works out
+# at 270 tokens, and a model that ignores reasoning_effort spends its whole allowance thinking and
+# returns finish_reason='length' with an empty body -- indistinguishable from an outage at this
+# layer. The floor costs nothing when thinking is off (a draft stops when it stops) and is the
+# difference between degrading and working when it is not.
+_MIN_TOKEN_BUDGET = 1500
+
+
+def _token_budget(channel: Channel) -> int:
+    return max(_MAX_WORDS[channel] * 6, _MIN_TOKEN_BUDGET)
+
+
 def generate(
     ctx: MessageContext,
     *,
@@ -208,7 +220,7 @@ def generate(
                 build_prompt(ctx),
                 job=LLMJob.DRAFTING,
                 system=_SYSTEM,
-                max_tokens=_MAX_WORDS[ctx.channel] * 6,
+                max_tokens=_token_budget(ctx.channel),
                 response_format={"type": "json_object"},
             )
         except LLMUnavailable as exc:
