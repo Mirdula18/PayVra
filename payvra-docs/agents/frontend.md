@@ -16,18 +16,53 @@ they drift, and the drift shows up during a demo.
 
 ---
 
-## Screens, in build order
+## Phase 8 submission scope — three screens
 
-| Order | Screen | Purpose |
-|---|---|---|
-| 1 | `Worklist` | The primary screen. Ranked queue. |
-| 2 | `Upload` | Batch import, column mapping, repair queue |
-| 3 | `Consent` | Per-counterparty consent, quarantine list |
-| 4 | `Account` | Per-counterparty timeline |
-| 5 | `ReviewPlan` | 14-day preview before activation |
-| 6 | `Dashboard` | Recovered / needs-you / promises / exceptions |
-| 7 | `AuditLog` | Filterable audit trail — the demo screen |
-| 8 | `Settings` | Guardrail configuration |
+**Cut to the minimum that evidences `requirements/track3-bar.md`.** Everything else in this
+document is POST-SUBMISSION. A screen that does not carry a clause does not ship first.
+
+**Server-rendered is fine.** The React stack below stays specified and stays the target, but the
+bar asks for evidence, not for a single-page app. If server-rendered templates get the three
+screens done sooner and more reliably, build those — a judge is reading numbers off a page, and
+nothing in the bar rewards client-side routing. Decide on time remaining, not on preference.
+
+| # | Screen | Evidences | Must show |
+|---|---|---|---|
+| 1 | **Ranked worklist** | context for 1, 2 | Invoices ordered by priority with the plain-English reason per row. This is what makes it not an aging report. |
+| 2 | **Recovered figure** | clause 1 | ₹ recovered and invoice count for one `recovery_run_id`. **Both figures, labelled** — causal as headline, time-window beside it (FR-17.4). |
+| 3 | **Audit log** | clauses 3, 4 | Refusals **beside** sends, with the reason on each refusal. Filter by verdict in one click. |
+
+**Screen 3 is the demo screen and the hardest to fake.** The moment that lands is not what the
+agent did — it is opening the log, filtering to `outcome = blocked`, and showing every message the
+system refused to send with the rule that stopped it. Build that filter first, not last.
+
+Three details that are easy to drop and expensive to miss:
+
+* **The refusal reason must be human-readable on the row.** "Gate check 4 failed" is not evidence;
+  "3rd contact in 7 days — frequency cap" is.
+* **Sends and refusals belong in one list, not two tabs.** Separating them lets a viewer see only
+  the flattering half, which is the opposite of the argument being made.
+* **If a contact-hours override was active, surface it** (FR-16.8). A run that widened the window
+  and says so is compliant by record; one that hides it is not.
+
+### POST-SUBMISSION — the full screen set
+
+Specified, wanted, and not built before submission.
+
+| Order | Screen | Purpose | Status |
+|---|---|---|---|
+| 1 | `Worklist` | The primary screen. Ranked queue. | **Phase 8 — ships** |
+| 2 | `Upload` | Batch import, column mapping, repair queue | POST — the API works; seed covers the demo |
+| 3 | `Consent` | Per-counterparty consent, quarantine list | POST — enforced by gate check 3 regardless |
+| 4 | `Account` | Per-counterparty timeline | POST |
+| 5 | `ReviewPlan` | 14-day preview before activation | POST — `dry_run` (FR-16.7) covers this for now |
+| 6 | `Dashboard` | Recovered / needs-you / promises / exceptions | **trimmed** — recovered figure only |
+| 7 | `AuditLog` | Filterable audit trail — the demo screen | **Phase 8 — ships** |
+| 8 | `Settings` | Guardrail configuration | POST — env vars only in Phase 6 |
+
+Screens 3, 4 and 5 depend on capabilities that are themselves POST (FR-11, FR-12) or already
+enforced server-side without a UI. Nothing is lost by deferring them; a judge cannot see consent
+enforcement on a screen anyway — they see it in the audit log as a refusal, which is screen 3.
 
 ---
 

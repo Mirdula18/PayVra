@@ -42,10 +42,16 @@ failures and requeue the action.
 
 ```python
 payload = {
-    "amount": invoice.outstanding_paise,
+    # Capped, never the raw outstanding: Razorpay refuses links above the platform ceiling
+    # (~₹5L) and the top three worklist invoices are all above it. An over-ceiling invoice is
+    # collected in tranches, each reconciling through the FR-13.4 partial path.
+    # ADR-006 option C; FR-9.8, FR-9.9.
+    "amount": min(invoice.outstanding_paise, LINK_AMOUNT_CEILING),
     "currency": "INR",
     "accept_partial": accept_partial,
-    "reference_id": invoice.invoice_number,        # THE reconciliation key
+    # Unique per link, not per invoice: Razorpay 400s a reused reference_id, so regenerations
+    # and tranches carry a -R2 / -R3 suffix. next_reference_id() owns this.
+    "reference_id": reference_id,                  # THE reconciliation key
     "description": f"Invoice {invoice.invoice_number}",
     "customer": {
         "name": contact.name,

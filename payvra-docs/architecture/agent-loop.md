@@ -56,6 +56,12 @@ should be able to open `agent/registry.py` and `guardrails/gate.py` on screen wh
 `plan_day` runs this graph once per eligible invoice. It does **not** execute — it only queues.
 Execution happens later, in the dispatch window, behind the gate.
 
+> **Phase 6 does not build it this way.** The queue-then-dispatch split above is the production end
+> state and remains the documented target. Phase 6 ships a **synchronous batch runner** instead:
+> the same nodes, but the edge after `validate` leads straight to the gate and to execution rather
+> than to a queue a scheduler drains later. See **Phase 6 deliverable** below, and ADR-009 for why.
+> The node structure in this section is unchanged and non-negotiable either way.
+
 ---
 
 ## Node: observe
@@ -160,6 +166,148 @@ if broken_promise_count >= 3:                        stop, reason = broken_promi
 ```
 
 Test this path explicitly. Set `LLM_ENABLED=false` and verify the batch still runs end to end.
+
+---
+
+## Phase 6 deliverable: the batch runner
+
+**This section is the Phase 6 spec.** Everything above describes the loop's shape; this describes
+what actually gets built, and what deliberately does not. Authority: ADR-009.
+
+Phases 3, 4 and 5 are complete and live-verified, and **none of them has a production caller.** The
+batch runner is that caller. It is the single piece that turns three proven components into
+measured recovery, which is why all four clauses of `requirements/track3-bar.md` unlock here.
+
+### One pass, one command, one run id
+
+```
+run(merchant_id, limit=N, dry_run=False) -> RecoveryRunResult
+
+  open a recovery_run row  ->  recovery_run_id
+  for account in ranked_worklist(merchant_id)[:N]:
+      diagnose                       # rules first, LLM only for ambiguity
+      propose exactly ONE action     # from the closed registry, nothing else
+      submit to gate()               # all seven checks, Phase 3, unmodified
+      if approved:
+          create Razorpay link       # Phase 4
+          generate message           # Phase 5
+          record executed
+      else:
+          persist the refusal with its reason
+          continue                   # a refusal is a result, not an error
+  close the recovery_run row with its counts
+```
+
+Synchronous, in-process, top to bottom. No window to wait for, no queue to inspect. The run either
+produced results or it did not, and the audit trail is the output rather than a side channel.
+
+**`limit` is configurable and the default is small.** A full 120-invoice pass makes real Razorpay
+links and real model calls; the test-mode link budget is 25 (see `razorpay/links.py`). Treat the
+budget as the binding constraint on `N`, not runtime.
+
+**`dry_run` must exist.** It runs diagnose, propose and gate, and persists verdicts, but creates no
+link and sends nothing. This is how the escalation ladder and the refusal list get rehearsed
+without consuming link budget, and how a run is checked before it moves money.
+
+### The per-account sequence is fixed
+
+`create link -> generate -> gate -> execute`, one account at a time. Not batched, and not
+gate-first. Two reasons, both already documented and both still binding:
+
+* Gate check 6 inspects a **drafted message** — banned phrases, amount, invoice number, link,
+  opt-out. There is nothing to inspect before generation, so gate-first would fail every outbound
+  action rather than pass it vacuously.
+* A gate verdict is a statement about a moment, and goes stale (`delivery/sender.py`,
+  `VERDICT_MAX_AGE`). Generating a whole batch and then gating it would fail verdicts on age
+  rather than on policy.
+
+### Escalation — the minimal version
+
+**A per-invoice attempt counter, and nothing else.**
+
+| Attempt | Tone tier | Template |
+|---|---|---|
+| 1 | 1 | existing, live-verified Phase 5 grid |
+| 2 | 2 | same |
+| 3 | 3 | same — and tier 3+ needs human approval (gate check 5) |
+
+That is the entire escalation design. **Do not add escalation logic here.**
+
+Whether attempt N may fire at all is already decided, by code that is already built and already
+verified: frequency caps (check 4: 3 per rolling 7 days, 7 per invoice lifetime), contact hours
+(check 1), value and tone-tier approval (check 5), and stopping rules (check 7: settled, disputed,
+opted out, three broken promises, cap reached). The runner reads the counter, picks the tier, and
+submits. The gate decides.
+
+Duplicating any of that here would create a second place where escalation policy lives, and the two
+would drift. The dependency is the design.
+
+**"Compliant escalation" needs refusals in it.** An escalation sequence where every attempt was
+approved does not evidence compliance — it evidences that nothing was checked. A run that produces
+both approvals and refusals is the artefact; see clause 2 of `requirements/track3-bar.md`.
+
+### Link amounts are capped at the platform ceiling
+
+Razorpay refuses links above roughly ₹5L, and the top three worklist rows are ₹14.0L, ₹10.7L and
+₹9.3L. Under ADR-006 option C the runner creates each link at `min(outstanding_paise, ceiling)`
+with `accept_partial` set, collecting an over-ceiling invoice in tranches that reconcile through
+the existing FR-13.4 partial path (FR-9.8, FR-9.9).
+
+Two consequences for the runner:
+
+* **An account may be revisited across runs** until its balance clears. The attempt counter and the
+  frequency caps govern that exactly as they do any other repeat contact — no special case.
+* **Recovery is counted in rupees received, not invoices settled** (FR-17). A tranche-collected
+  invoice is `partially_paid` with real money recovered against it, and a settled-invoice-only
+  figure would report it as zero.
+
+**`offer_installment` in the closed registry below is now OPEN, not deferred.** It was P1 and
+gated on FR-9.6; the ceiling split gives the same machinery a P0 reason to exist. Whether the agent
+should also propose a *strategic* instalment offer for `cash_crunch` — distinct from the mechanical
+ceiling split it now gets for free — is a **Phase 6 implementation decision**, to be made when the
+registry is wired. Do not prune it from the registry in advance.
+
+### Explicit non-goals for Phase 6
+
+Deferred, not rejected. Each has a documented home; none is required by any clause of the bar.
+
+| Non-goal | Why deferred | Where it lives |
+|---|---|---|
+| **Scheduler** | The bar asks for a measured run, not an unattended one. The runner is a plain callable a job would call unchanged. | ADR-007, `scheduler/jobs.py` |
+| **Async queue** | Claim protocols and dispatch windows are for surviving partial failure at scale. Phase 6 needs one inspectable pass. | ADR-004, `dispatch_window` |
+| **Retry layer** | A transient provider failure costs that account this run. Re-running is safe (idempotency below). | ADR-009 consequences |
+
+Adding any of these to Phase 6 delays the only thing that moves all four clauses.
+
+### The contact-hours window is configurable — with conditions
+
+Gate check 1 refuses every outbound action outside 08:00–19:00 IST. Correct, and the default is
+unchanged. But a rehearsal at 21:00 IST produces a run where everything is refused — a flawless
+clause-3 demo and a zero for clause 1, from one command.
+
+Three conditions, all binding (ADR-009):
+
+1. **The gate still executes.** No bypass path, no skip flag. The window is a value the check
+   reads, never a rule it can be told to ignore.
+2. **Widened only by explicit environment variable.** Never a request parameter, never a default.
+3. **An active override is written into the audit log**, so an out-of-window run is compliant *by
+   record* — the trail shows the window was widened and when, rather than leaving a judge unable to
+   tell that it was.
+
+Rehearsing inside the window remains the recommended path. See the Phase 9 runbook.
+
+### Idempotency
+
+The existing guarantees carry, and are what make a re-run safe after an interrupted one:
+
+* `create_payment_link` — idempotency key `sha256(invoice_id + amount + purpose)`; a repeat returns
+  the stored link without calling Razorpay, so a re-run cannot burn budget
+* Message generation is cached; identical content is never regenerated
+* Gate check 2 (freshness) re-reads payment status immediately before the send, so an invoice paid
+  between two runs is not chased by the second
+
+A run is **not** checkpointed. Interrupting one leaves the remaining accounts untouched; re-running
+is safe but starts from the top of the worklist.
 
 ---
 
