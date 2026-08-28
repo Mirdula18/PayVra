@@ -194,23 +194,72 @@ already-verified payload, degrades to a body-derived `sha256:` key rather than r
 `make inspect-webhook` reports which of the two was used — a `sha256:` key on a real delivery
 means the header did not arrive and is worth checking against Razorpay's delivery log.
 
-### 2. `reference_id` may not be reusable
+### 2. `reference_id` may not be reusable — ✅ CONFIRMED AND FIXED (2026-08-26)
 
-`links.py` sets `reference_id` to `invoice.invoice_number` on **every** link, and
-`regenerate_if_needed` (FR-9.4) creates a *second* link for the same invoice — same
-`reference_id`, different idempotency key. Razorpay treats `reference_id` as a unique identifier
-per account.
+Razorpay **does** enforce `reference_id` uniqueness per account and rejects a reuse with
+`400 BAD_REQUEST_ERROR`. Every FR-9.4 regeneration would have failed in production, and
+`link_hygiene` with it — its inner handler catches only `LinkBudgetExceeded`, so a
+`RazorpayClientError` would have rolled the whole job back, losing cancellations that had already
+succeeded.
 
-If it rejects the duplicate, regeneration has never worked outside the stubs. The
-`--skip-dup-check`-able probe in `verify-razorpay` tests exactly this and prints the rework note
-if it 4xxs.
+Fixed in commit `7c830db`: `next_reference_id()` keeps the clean invoice number for the first link
+and suffixes regenerations `-R2`, `-R3`; `base_reference_id()` strips the suffix on reconciliation's
+fallback route. Check 4 of `verify-razorpay` now asserts both halves — a duplicate must be refused,
+a suffixed reference must be accepted — so it stays a regression guard.
+
+**The stubbed transport accepted the duplicate happily. Only a real call caught it.** That is the
+entire argument for this runbook.
+
+---
+
+## Settlement verified end to end — ✅ 2026-08-26
+
+`INV-2026-1020`, ₹23,134, on a link created by `scripts/create_demo_link` against a real seeded
+invoice. Paid by card in test mode; a genuinely Razorpay-signed `payment_link.paid` arrived,
+verified, deduped on the `X-Razorpay-Event-Id` header, and settled the invoice:
+`payment_status → paid`, `recovery_state → settled`, `outstanding_paise → 0`, `settled_at` set.
+
+All four assumptions at the top of this runbook are now proven.
+
+---
+
+## 🔴 Still blocked: live revocation-on-settle
+
+**Scheduled, not assumed.** This is the one part of Phase 4 reconciliation that has **never
+executed against real data**, and it is the part the docs call the most important line in the
+product: when an invoice settles, every pending `Action` for it must be revoked in the same
+transaction. Chasing someone who has already paid is the worst failure mode this product has.
+
+The settlement above reported `revoked_actions: 0`. Not a failure — there was nothing to revoke.
+The seed carries only `executed` and `gated_fail` actions; **pending actions are created by the
+Phase 6 batch runner**, which does not exist yet. There is currently no way to produce the
+precondition.
+
+| | |
+|---|---|
+| **Blocked on** | Phase 6 — the batch runner creating `proposed` / `approved` actions |
+| **Unblocks in** | Phase 6, immediately: run the batch, then pay a link for an invoice it just acted on |
+| **Covered today by** | 4 unit tests, including transactional atomicity (`test_reconciliation.py`) |
+| **Evidences** | Track 3 bar clause 3 (stopping rules) — a settled invoice not chased |
+
+### The verification, to run in Phase 6
+
+1. `make demo-link ARGS="--invoice <one the run just touched>"` — an invoice with pending actions
+2. Confirm pending actions exist for it before paying
+3. Pay the link
+4. `make inspect-webhook` — **`revoked_actions` must be greater than zero**
+5. Confirm every revoked row carries `revoked_at`, and that no further outreach is scheduled
+
+Until step 4 shows a non-zero count against real data, treat revocation as unit-tested only and say
+so. A `revoked_actions: 0` reading is not evidence of anything.
 
 ---
 
 ## What this does not cover
 
 - **Delivery providers** (Resend/MSG91/WhatsApp) — separate keys, separate verification.
-- **Settlement against a seeded invoice** — B5 deliberately uses a throwaway reference. Pay a link
-  built for a real invoice to exercise `settle_invoice` end to end.
+- **Live revocation-on-settle** — blocked on Phase 6; see above.
 - **The dashboard poll** — `GET /invoices/{id}/reconciliation-status` is built and tested, but
   rendering it is Phase 8 (see `agents/frontend.md`).
+- **The payment link amount ceiling** — links above roughly ₹5L are refused, so the three
+  highest-value seeded invoices cannot be collected. Blocker; see ADR-006.

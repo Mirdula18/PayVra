@@ -16,3 +16,4 @@ Status values: `Accepted` · `Superseded by ADR-XXX` · `Deprecated`
 | [006](./ADR-006-razorpay-integration.md) | Payment Links as primary rail; REST over MCP | Accepted |
 | [007](./ADR-007-database-and-queue.md) | Postgres + APScheduler, not Celery | Accepted |
 | [008](./ADR-008-scoring-engine.md) | Explainable weighted rules over a trained model | Accepted |
+| [009](./ADR-009-batch-runner-and-run-scoped-recovery.md) | Synchronous batch runner; run-scoped recovery measurement | Accepted |
