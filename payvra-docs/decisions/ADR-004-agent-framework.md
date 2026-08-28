@@ -1,7 +1,17 @@
 # ADR-004 — LangGraph over raw tool-calling or CrewAI
 
-**Status:** Accepted
+**Status:** Accepted — **execution split partially superseded by ADR-009**
 **Date:** 2026-08-23
+
+> **What changed (2026-08-26).** The `observe → diagnose → plan → validate` node structure below
+> stands unchanged and remains non-negotiable — it is how ADR-001's "LLM proposes, deterministic
+> code disposes" is enforced.
+>
+> What ADR-009 supersedes is only **what happens after `validate`**. This ADR assumes `plan_day`
+> queues an action for a later `dispatch_window` to claim and execute. Phase 6 instead runs one
+> synchronous pass: the edge after `validate` leads straight to the gate and to execution. The
+> queue-then-dispatch model remains the documented production end state and is deferred, not
+> rejected. See ADR-009 for the reasoning.
 
 ## Context
 
