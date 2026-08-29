@@ -33,6 +33,38 @@ all seven always evaluated even after one fails. Every verdict — pass and fail
 The gate contains **no LLM call** and is not bypassable. A failed check halts the action; there is
 no "warn and continue."
 
+### Scope exemptions (added 2026-08-26)
+
+Three checks govern *contacting someone* and are exempt for actions that contact nobody. These are
+scope rules, not escape hatches: the check still runs, still writes its verdict, and there is no
+flag that skips one.
+
+| Check | Exempt for | Why |
+|---|---|---|
+| 1 `time_window` | any non-outbound action | contact hours cannot be breached by an action that contacts no one |
+| 5 `value_threshold` | any non-outbound action | approval governs contact, not bookkeeping |
+| 7 `stopping_rules` | `stop`, `mark_disputed` | these *are* the stopping decision |
+
+Checks 5 and 7 were added after the Phase 6 runner first put real proposals through the gate, and
+both were fixing the same failure: **the gate was refusing the action that would have implemented
+its own verdict.**
+
+* A `stop` on a high-value invoice was refused for exceeding the approval threshold — inverting
+  the registry's central asymmetry that *stopping never needs approval; escalating does*. The
+  safest available action became the one requiring permission.
+* A `stop` on an invoice that had hit the touch cap was refused *by the touch-cap rule*. The
+  invoice could never reach `stopped`: propose, refuse, repeat, forever. The exception list —
+  the artefact that evidences stopping rules to a judge — would have stayed empty for exactly the
+  accounts belonging on it.
+
+`snooze` and `create_payment_link` are deliberately **not** exempt from check 7 despite also being
+non-outbound: creating a payment link for an invoice that has already settled is precisely the
+mistake check 7 exists to prevent.
+
+Neither exemption weakens an outbound path. Every existing gate test proposes `send_message`, which
+is why the gate's own suite could not have surfaced either — it took a caller that proposed the
+full range of the registry.
+
 **The gate runs after generation, immediately before the send.** Check 6 inspects a drafted
 message, so there is nothing to inspect until one exists — an outbound action arriving with no
 draft fails check 6 rather than passing vacuously. The per-action sequence is

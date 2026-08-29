@@ -38,7 +38,7 @@ Razorpay retries on non-2xx; slow handlers cause duplicate deliveries.
 | NFR-3.1 | All Razorpay writes carry an idempotency key |
 | NFR-3.2 | Webhook processing dedupes on the `x-razorpay-event-id` header; replaying an event is a no-op |
 | NFR-3.3 | Scheduled jobs are idempotent; a double-run must not double-send |
-| NFR-3.4 | Razorpay API failures retry with backoff; circuit-break after 5 consecutive failures |
+| NFR-3.4 | Razorpay 5xx, connection errors **and 429** retry with backoff; other 4xx never retry; circuit-break after 5 consecutive failures (429 excluded — see `agents/razorpay-integration.md`) |
 | NFR-3.5 | Any unhandled exception in the send path fails **closed** — no message goes out |
 | NFR-3.6 | Race condition: payment lands while a message is queued → freshness check (FR-7.2) catches it |
 

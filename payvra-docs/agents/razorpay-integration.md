@@ -36,6 +36,26 @@ Retry with exponential backoff on 5xx and on connection errors. **Never retry a 
 our request is wrong, and retrying just burns rate limit. Circuit-break after 5 consecutive
 failures and requeue the action.
 
+### Exception: 429 is retried (revised 2026-08-26)
+
+**429 is excluded from the "never retry a 4xx" rule.** The original rule covered it, on the
+reasoning that a rate-limit reply is precisely the moment not to send more requests. That
+conflates *not hammering* with *not retrying*: the client backs off exponentially with jitter, so
+a retry lands 0.5s, then 1s, then 2s later — never immediately. Refusing to retry does not slow
+anything down. It just loses the request.
+
+A 4xx means "this request is malformed and will be malformed again". A 429 means "this request is
+fine, ask again shortly". Those are different failures and they need different handling.
+
+Found by the Phase 6 batch runner against the live API: creating several links in succession
+tripped Razorpay's rate limit and **four accounts were dropped from the run**, each one an invoice
+that could have been collected. `Retry-After` is honoured when Razorpay sends the delta-seconds
+form, capped at `RETRY_AFTER_CEILING_SECONDS` so a run requeues rather than blocking for minutes;
+the HTTP-date form falls back to our own backoff rather than guessing at clock skew.
+
+429 also does **not** count toward the circuit breaker. Being rate-limited is not the API being
+unhealthy — it is the API working correctly and telling us so.
+
 ---
 
 ## Payment link creation

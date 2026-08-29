@@ -150,6 +150,26 @@ ADR.**
 |---|---|
 | New `recovery_runs` table | The run itself: id, merchant, started/finished, limit, window override, counts |
 | `actions.recovery_run_id` | Causal attribution, and "what did this run do?" |
-| `audit_log.recovery_run_id` | Filter the trail to one run — the clause 3 and 4 demo |
+| `audit_log.inputs['recovery_run_id']` | Filter the trail to one run — the clause 3 and 4 demo |
 
 `invoices.settled_at` already exists and needs no change; it is what both recovery figures read.
+
+### Amendment (2026-08-26): the audit run id is a field inside `inputs`, not a column
+
+This ADR originally specified `audit_log.recovery_run_id` as a column. **It is stored inside the
+existing `inputs` JSONB instead**, with an expression index (`idx_audit_recovery_run`) so filtering
+stays an indexed lookup.
+
+The reason is the audit log's whole purpose. Tamper-evidence comes from a hash over a canonical
+serialisation of each row's business fields, and `inputs` is inside that hash — a newly added
+column would not be. Run attribution is precisely the field a judge reads off the trail, so
+storing it outside the chain would mean the one attribute the demo turns on could be altered
+without breaking the chain that exists to detect alteration.
+
+Adding it *to* the canonical form was the alternative, and was rejected: it would change the hash
+computation for every row, so `verify_chain` would recompute existing entries under the new format
+and report the chain broken. Preserving the chain across a schema change is worth more than the
+tidiness of a dedicated column.
+
+No behaviour depends on the difference. The trade is one JSONB lookup against a guarantee that
+holds.
