@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.audit.log import record as audit_record
 from app.clock import IST, now_utc
-from app.enums import ActorType, PaymentStatus
+from app.enums import ActionType, ActorType, PaymentStatus
 from app.guardrails import policy_content, stopping
 from app.models.action import Action
 from app.models.consent import Consent
@@ -58,6 +58,11 @@ WEEK_DAYS = 7
 # is outside that set and would have broken any consumer filtering on it.
 GATE_PASSED_OUTCOME = "approved"
 GATE_BLOCKED_OUTCOME = "blocked"
+
+# Actions that *are* the stopping decision. Exempt from check 7, because refusing them would leave
+# an invoice that must stop permanently unable to reach the stopped state. See
+# check_stopping_rules for the full reasoning.
+STOPPING_IMPLEMENTED_BY = frozenset({ActionType.STOP, ActionType.MARK_DISPUTED})
 
 
 class GateError(Exception):
@@ -351,7 +356,30 @@ def check_value_threshold(ctx: ExecutionContext, action: ProposedAction) -> Chec
     """Above the merchant's value threshold, or tier 3+, requires human approval (FR-7.5, FR-7.6).
 
     Both conditions are reported when both apply, so an approval queue entry says why it is there.
+
+    **Non-outbound actions are exempt**, the same exemption ``check_time_window`` makes and for the
+    same reason: approval governs *contacting* someone, and an action that contacts nobody cannot
+    breach a contact-conduct rule. Without this, the registry's central asymmetry inverts --
+    "stopping never needs approval; escalating does" -- because ``stop``, ``snooze`` and
+    ``mark_disputed`` all read the invoice's outstanding amount and would be blocked on high-value
+    accounts. The effect is that the *safest* action becomes the one requiring permission, and a
+    high-value account that should be stopped sits in limbo instead.
+
+    Surfaced when the Phase 6 runner first proposed ``stop`` for a Rs 14L invoice and the gate
+    refused it. Every existing test here proposes ``send_message``, which is why the gate's own
+    suite could not have caught it.
     """
+    if not action.is_outbound:
+        return CheckResult(
+            check=CheckName.VALUE_THRESHOLD,
+            passed=True,
+            detail={
+                "exempt": True,
+                "reason": "action does not contact anyone; approval governs contact",
+                "action_type": action.type.value,
+            },
+        )
+
     threshold = ctx.merchant.approval_value_threshold_paise
     tone_ceiling = ctx.merchant.approval_tone_tier
     outstanding = ctx.invoice.outstanding_paise
@@ -459,7 +487,29 @@ def check_stopping_rules(ctx: ExecutionContext, action: ProposedAction) -> Check
 
     Absolute -- CLAUDE.md invariant 8. Delegates to :mod:`app.guardrails.stopping` so the
     reconciliation, reply and promise-sweep paths in later phases evaluate the identical rules.
+
+    **The actions that implement stopping are exempt.** ``stop`` and ``mark_disputed`` contact
+    nobody and are the very outcome the rule demands. Refusing them means an invoice that has hit
+    the touch cap can never actually be moved to ``stopped``: the runner proposes the stop, the
+    gate refuses it, the invoice stays in limbo, and every later run re-proposes and is refused
+    again. The exception list -- the artefact that evidences stopping rules -- would stay empty
+    precisely for the accounts that belong on it.
+
+    ``snooze`` and ``create_payment_link`` are deliberately NOT exempt despite also being
+    non-outbound: creating a payment link for an invoice that has already settled is exactly the
+    kind of mistake this check exists to prevent.
     """
+    if action.type in STOPPING_IMPLEMENTED_BY:
+        return CheckResult(
+            check=CheckName.STOPPING_RULES,
+            passed=True,
+            detail={
+                "exempt": True,
+                "reason": "this action implements the stopping decision rather than defying it",
+                "action_type": action.type.value,
+            },
+        )
+
     payment_status, _ = ctx.fresh_payment_status()
     opted_out = ctx.db.execute(
         select(func.count())

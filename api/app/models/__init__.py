@@ -16,6 +16,7 @@ from app.models.message import Message
 from app.models.metrics_snapshot import MetricsSnapshot
 from app.models.payment_link import PaymentLink
 from app.models.promise import Promise
+from app.models.recovery_run import RecoveryRun
 from app.models.reply import Reply
 from app.models.webhook_event import WebhookEvent
 
@@ -36,4 +37,5 @@ __all__ = [
     "MetricsSnapshot",
     "Batch",
     "BatchRow",
+    "RecoveryRun",
 ]

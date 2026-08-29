@@ -19,6 +19,14 @@ class Action(Base):
     merchant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("merchants.id"), nullable=False)
     invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id"), nullable=False)
 
+    # Which batch-runner pass produced this action (ADR-009). Nullable because actions can also be
+    # created outside a run -- by a human, or by the seed -- and because every row that existed
+    # before Phase 6 has no run to point at. This is the join that makes causal recovery
+    # attribution possible: "money against invoices this run acted on" (FR-17.1).
+    recovery_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("recovery_runs.id"), nullable=True
+    )
+
     type: Mapped[str] = enum_column()
     status: Mapped[str] = enum_column()
     channel: Mapped[str | None] = enum_column(nullable=True)
@@ -54,4 +62,6 @@ class Action(Base):
         Index("idx_dispatch", "merchant_id", "status", "scheduled_for"),
         # Backs the revoke-on-settle sweep — the most important write path.
         Index("idx_actions_invoice", "invoice_id"),
+        # Backs "what did this run do?" and the causal recovery join (FR-17.1).
+        Index("idx_actions_recovery_run", "recovery_run_id"),
     )
