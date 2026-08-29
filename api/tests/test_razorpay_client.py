@@ -11,6 +11,7 @@ import uuid
 import httpx
 import pytest
 
+from app.razorpay import client as client_mod
 from app.razorpay.client import (
     CIRCUIT_FAILURE_THRESHOLD,
     MAX_ATTEMPTS,
@@ -86,9 +87,17 @@ def test_4xx_is_never_retried() -> None:
     assert excinfo.value.code == "BAD_REQUEST_ERROR"
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422, 429])
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
 def test_no_4xx_status_is_retried(status: int) -> None:
-    """Including 429. A rate-limit reply is precisely the moment not to send more requests."""
+    """A malformed or unauthorised request will be just as malformed on a second attempt.
+
+    **429 is deliberately excluded** — see the test below. This assertion previously included it,
+    on the reasoning that "a rate-limit reply is precisely the moment not to send more requests".
+    That conflates *not hammering* with *not retrying*: the client backs off exponentially with
+    jitter, so a retry lands 0.5s, then 1s, then 2s later rather than immediately. Never retrying
+    does not slow anything down, it simply loses the request — and a batch run creating several
+    links in succession lost four accounts that way against the live API.
+    """
     calls: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -98,6 +107,83 @@ def test_no_4xx_status_is_retried(status: int) -> None:
     with pytest.raises(RazorpayClientError):
         make_client(handler).request("GET", "/payment_links/x")
     assert len(calls) == 1
+
+
+def test_429_is_retried_with_backoff() -> None:
+    """Rate limiting is transient by definition: the same request succeeds shortly (NFR-3.4)."""
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, json={"error": {"description": "Too many requests"}})
+
+    with pytest.raises(RazorpayServerError):
+        make_client(handler).request("GET", "/payment_links/x")
+    assert len(calls) == 3, "429 must exhaust the attempt budget, not fail on the first reply"
+
+
+def test_a_429_that_clears_succeeds_without_losing_the_account() -> None:
+    """The case that matters: one rate-limited attempt must not cost an invoice its turn."""
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": {"description": "slow down"}})
+        return httpx.Response(200, json={"id": "plink_ok"})
+
+    result = make_client(handler).request("GET", "/payment_links/x")
+    assert result["id"] == "plink_ok"
+    assert len(calls) == 2
+
+
+def test_retry_after_is_honoured_when_razorpay_sends_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Razorpay knows its own window better than our backoff curve does."""
+    slept: list[float] = []
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: slept.append(s))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, headers={"Retry-After": "2"}, json={"error": {"description": "slow"}}
+        )
+
+    with pytest.raises(RazorpayServerError):
+        make_client(handler).request("GET", "/payment_links/x")
+    assert 2.0 in slept
+
+
+def test_an_absurd_retry_after_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch run should requeue rather than block for minutes on a single link."""
+    slept: list[float] = []
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: slept.append(s))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, headers={"Retry-After": "600"}, json={"error": {"description": "slow"}}
+        )
+
+    with pytest.raises(RazorpayServerError):
+        make_client(handler).request("GET", "/payment_links/x")
+    assert max(slept) <= client_mod.RETRY_AFTER_CEILING_SECONDS
+
+
+def test_an_unparseable_retry_after_falls_back_to_our_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP-date form is legal but needs clock-skew handling; guessing wrong is worse."""
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"},
+            json={"error": {"description": "slow"}},
+        )
+
+    with pytest.raises(RazorpayServerError):
+        make_client(handler).request("GET", "/payment_links/x")
 
 
 def test_5xx_is_retried_to_the_attempt_limit() -> None:

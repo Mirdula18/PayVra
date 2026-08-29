@@ -25,6 +25,9 @@ EXPECTED_TABLES = {
     # Phase 1 (migration 0003): ingestion provenance and the repair queue.
     "batches",
     "batch_rows",
+    # Phase 6 (migration 0006): one pass of the batch runner. Deliberately NOT "batches" --
+    # that is an uploaded invoice file, and a recovery run is an execution over a worklist.
+    "recovery_runs",
 }
 
 

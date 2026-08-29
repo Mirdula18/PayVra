@@ -15,7 +15,7 @@ from app.models.contact import Contact
 from app.models.invoice import Invoice
 from app.models.payment_link import PaymentLink
 from app.razorpay import links as links_mod
-from app.razorpay.client import RazorpayClient
+from app.razorpay.client import RazorpayClient, RazorpayClientError
 from app.razorpay.links import (
     LINK_BUDGET,
     RAZORPAY_TEST_MODE_LINK_CAP,
@@ -23,7 +23,10 @@ from app.razorpay.links import (
     LinkPurpose,
     base_reference_id,
     build_payload,
+    bump_reference_id,
+    capped_amount,
     create_link,
+    exceeds_ceiling,
     links_used,
     next_reference_id,
     notify_link,
@@ -343,6 +346,157 @@ def test_an_invoice_with_no_live_link_is_left_alone(
     """Nothing to regenerate. Creating one here would be issuing a link nobody asked for."""
     _add_link(db_session, gate_invoice, expires_in=timedelta(hours=1), status="expired")
     assert regenerate_if_needed(db_session, make_client(), gate_invoice) is None
+
+
+# --- reference_id collisions against Razorpay ---------------------------------------------------
+
+
+def _rejecting_client(taken: set[str], seen: list[str]) -> RazorpayClient:
+    """A Razorpay that already holds ``taken`` reference_ids and rejects them as it really does."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        body = _json.loads(request.content) if request.content else {}
+        reference = str(body.get("reference_id"))
+        seen.append(reference)
+        if reference in taken:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "BAD_REQUEST_ERROR",
+                        "description": (
+                            f"payment link with given reference_id: {reference} already "
+                            "exists. Please create a payment link with a different reference_id"
+                        ),
+                    }
+                },
+            )
+        link_id = f"plink_{uuid.uuid4().hex[:12]}"
+        return httpx.Response(
+            200,
+            json={"id": link_id, "short_url": f"https://rzp.io/i/{link_id}", "status": "created"},
+        )
+
+    client = RazorpayClient(key_id="rzp_test_x", key_secret="s")
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.razorpay.test/v1"
+    )
+    return client
+
+
+def test_bump_reference_id_walks_the_suffix() -> None:
+    assert bump_reference_id("INV-2026-1084") == "INV-2026-1084-R2"
+    assert bump_reference_id("INV-2026-1084-R2") == "INV-2026-1084-R3"
+    assert bump_reference_id("INV-2026-1084-R9") == "INV-2026-1084-R10"
+
+
+def test_a_reference_taken_at_razorpay_is_retried_not_failed(
+    db_session: Session, gate_invoice: Invoice
+) -> None:
+    """The reseed scenario: Razorpay remembers a reference our database has forgotten.
+
+    next_reference_id counts local rows, but uniqueness is enforced remotely. After a reseed the
+    counter restarts while Razorpay still holds every reference ever used -- and because a failed
+    create writes no row, the count never advances and the invoice could never be collected again.
+    """
+    seen: list[str] = []
+    client = _rejecting_client({gate_invoice.invoice_number}, seen)
+
+    result = create_link(db_session, client, gate_invoice)
+
+    assert result.link.reference_id == f"{gate_invoice.invoice_number}-R2"
+    assert seen == [gate_invoice.invoice_number, f"{gate_invoice.invoice_number}-R2"]
+
+
+def test_several_taken_references_are_walked_past(
+    db_session: Session, gate_invoice: Invoice
+) -> None:
+    number = gate_invoice.invoice_number
+    taken = {number, f"{number}-R2", f"{number}-R3"}
+    seen: list[str] = []
+
+    result = create_link(db_session, _rejecting_client(taken, seen), gate_invoice)
+
+    assert result.link.reference_id == f"{number}-R4"
+
+
+def test_a_non_collision_400_is_not_retried(
+    db_session: Session, gate_invoice: Invoice
+) -> None:
+    """Retrying a genuinely malformed payload would loop instead of failing. Fail fast instead."""
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(
+            400,
+            json={"error": {"code": "BAD_REQUEST_ERROR", "description": "amount is invalid"}},
+        )
+
+    client = RazorpayClient(key_id="rzp_test_x", key_secret="s")
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.razorpay.test/v1"
+    )
+
+    with pytest.raises(RazorpayClientError):
+        create_link(db_session, client, gate_invoice)
+    assert len(calls) == 1
+
+
+# --- the amount ceiling (FR-9.8, FR-9.9) --------------------------------------------------------
+
+
+def test_an_amount_under_the_ceiling_is_untouched() -> None:
+    assert capped_amount(23_13_400) == 23_13_400
+
+
+def test_an_amount_over_the_ceiling_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Razorpay refuses a link above its maximum; capping makes that a smaller link, not a 400."""
+    monkeypatch.setattr(links_mod.settings, "link_amount_ceiling_paise", 50_000_000)
+    assert capped_amount(140_000_000) == 50_000_000
+    assert exceeds_ceiling(140_000_000)
+
+
+def test_a_disabled_ceiling_does_not_block_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A misconfigured ceiling must fail open, not silently stop every link being created."""
+    monkeypatch.setattr(links_mod.settings, "link_amount_ceiling_paise", 0)
+    assert capped_amount(140_000_000) == 140_000_000
+    assert not exceeds_ceiling(140_000_000)
+
+
+def test_a_capped_link_is_created_at_the_ceiling_and_accepts_partial(
+    db_session: Session, gate_invoice: Invoice, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-006 option C: collect an over-ceiling invoice in tranches.
+
+    ``accept_partial`` is forced on, because a link for less than the full amount with no way to
+    pay the rest against it is worse than no link at all.
+    """
+    monkeypatch.setattr(links_mod.settings, "link_amount_ceiling_paise", 10_00_000)
+    created: list[dict[str, Any]] = []
+
+    result = create_link(db_session, make_client(created), gate_invoice, amount_paise=50_00_000)
+
+    assert created[0]["amount"] == 10_00_000
+    assert created[0]["accept_partial"] is True
+    assert result.link.amount_paise == 10_00_000
+
+
+def test_the_cap_is_applied_before_the_idempotency_key(
+    db_session: Session, gate_invoice: Invoice, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two requests for the same over-ceiling invoice must resolve to one tranche, not two links."""
+    monkeypatch.setattr(links_mod.settings, "link_amount_ceiling_paise", 10_00_000)
+    created: list[dict[str, Any]] = []
+    client = make_client(created)
+
+    first = create_link(db_session, client, gate_invoice, amount_paise=50_00_000)
+    second = create_link(db_session, client, gate_invoice, amount_paise=60_00_000)
+
+    assert first.link.id == second.link.id
+    assert len(created) == 1, "the cap must not be applied after the idempotency lookup"
 
 
 # --- notify (FR-9.3) --------------------------------------------------------------------------

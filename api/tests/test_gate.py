@@ -352,6 +352,49 @@ def test_tone_tier_3_requires_approval_regardless_of_value(
     assert not verdict.result_for(CheckName.VALUE_THRESHOLD).passed
 
 
+def test_stopping_a_high_value_invoice_never_needs_approval(
+    db_session: Session, gate_invoice: Invoice, gate_merchant: Merchant, gate_consent: Consent
+) -> None:
+    """The registry's asymmetry: the system may always choose to do less.
+
+    Requiring permission to *stop* contacting a high-value counterparty inverts the rule -- the
+    safest action becomes the blocked one, and the account sits in limbo. Approval governs
+    contact, and stopping is the absence of contact.
+    """
+    gate_merchant.approval_value_threshold_paise = 1_00_000
+    db_session.flush()
+    verdict = gate(
+        db_session,
+        make_action(gate_invoice, type=ActionType.STOP, channel=None),
+        now=MIDDAY_IST,
+    )
+    assert verdict.result_for(CheckName.VALUE_THRESHOLD).passed
+
+
+def test_a_high_value_snooze_is_also_exempt(
+    db_session: Session, gate_invoice: Invoice, gate_merchant: Merchant, gate_consent: Consent
+) -> None:
+    """Same reasoning as stop: deferring contact is not contact."""
+    gate_merchant.approval_value_threshold_paise = 1_00_000
+    db_session.flush()
+    verdict = gate(
+        db_session,
+        make_action(gate_invoice, type=ActionType.SNOOZE, channel=None),
+        now=MIDDAY_IST,
+    )
+    assert verdict.result_for(CheckName.VALUE_THRESHOLD).passed
+
+
+def test_an_outbound_action_is_still_gated_on_value(
+    db_session: Session, gate_invoice: Invoice, gate_merchant: Merchant, gate_consent: Consent
+) -> None:
+    """The exemption must not leak: contacting someone still needs approval above the threshold."""
+    gate_merchant.approval_value_threshold_paise = 1_00_000
+    db_session.flush()
+    verdict = gate(db_session, make_action(gate_invoice), now=MIDDAY_IST)
+    assert not verdict.result_for(CheckName.VALUE_THRESHOLD).passed
+
+
 def test_human_approval_releases_the_threshold(
     db_session: Session, gate_invoice: Invoice, gate_merchant: Merchant, gate_consent: Consent
 ) -> None:
