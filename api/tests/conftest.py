@@ -190,13 +190,54 @@ def client(db_available: None) -> TestClient:
 
 
 @pytest.fixture()
-def gate_merchant(db_session: Session) -> Any:
+def gate_merchant(db_session: Session) -> Iterator[Any]:
+    """A throwaway merchant, whose committed rows are cleaned up afterwards.
+
+    ``db_session`` rolls back, which is enough for tests that only flush. The batch runner
+    **commits** — it has to, so an interrupted run keeps the work it did — so its rows survive the
+    rollback and accumulate in the developer's database as ``INV-GATE-*`` links and actions that
+    look like real demo data.
+
+    ``audit_log`` is deliberately not cleaned: DELETE on it is a no-op by rule (migration 0001),
+    which is the append-only guarantee working as intended. That leaves the merchant row itself
+    undeletable too, since audit entries reference it. Test merchants are therefore expected
+    residue; their *invoices, links and actions* are not, and those are what pollute a demo.
+    """
     from app.models.merchant import Merchant
 
     row = Merchant(id=uuid.uuid4(), name="GateTest", email=f"{uuid.uuid4()}@test.local")
     db_session.add(row)
     db_session.flush()
-    return row
+    merchant_id = row.id
+
+    yield row
+
+    db_session.rollback()
+    cleanup = SessionLocal()
+    try:
+        # FK order: children before parents.
+        for statement in (
+            "DELETE FROM messages WHERE action_id IN "
+            "(SELECT id FROM actions WHERE merchant_id = :m)",
+            "DELETE FROM actions WHERE merchant_id = :m",
+            "DELETE FROM payment_links WHERE invoice_id IN "
+            "(SELECT id FROM invoices WHERE merchant_id = :m)",
+            "DELETE FROM promises WHERE invoice_id IN "
+            "(SELECT id FROM invoices WHERE merchant_id = :m)",
+            "DELETE FROM replies WHERE invoice_id IN "
+            "(SELECT id FROM invoices WHERE merchant_id = :m)",
+            "DELETE FROM invoices WHERE merchant_id = :m",
+            "DELETE FROM consents WHERE counterparty_id IN "
+            "(SELECT id FROM counterparties WHERE merchant_id = :m)",
+            "DELETE FROM contacts WHERE counterparty_id IN "
+            "(SELECT id FROM counterparties WHERE merchant_id = :m)",
+            "DELETE FROM counterparties WHERE merchant_id = :m",
+            "DELETE FROM recovery_runs WHERE merchant_id = :m",
+        ):
+            cleanup.execute(text(statement), {"m": merchant_id})
+        cleanup.commit()
+    finally:
+        cleanup.close()
 
 
 @pytest.fixture()
