@@ -107,6 +107,36 @@ _PROVIDER_KEYS: tuple[tuple[str, str], ...] = (
 # parameter drop it (see DROP_UNSUPPORTED_PARAMS) rather than erroring.
 DEFAULT_REASONING_EFFORT = "none"
 
+# ...but providers disagree on how to say "as little as possible", and the disagreement is a hard
+# 400 rather than a shrug. Groq accepts only low|medium|high and rejects "none" outright; Gemini
+# accepts "none" and needs it, because at "low" it still spends the budget thinking.
+#
+# Sending "none" everywhere made every Groq call fail three times before falling through to
+# Gemini -- so Groq was dead for classification, extraction and proposal, the three jobs ADR-003
+# routes to it *first*. It went unnoticed because verify_llm only exercised drafting, which is
+# Gemini-first. drop_params does not help: litellm forwards the parameter happily, and it is the
+# *value* the provider rejects.
+_MINIMAL_REASONING: tuple[tuple[str, str], ...] = (
+    ("gemini/", "none"),
+    ("groq/", "low"),
+    # OpenRouter proxies many models; "low" is the value the OpenAI-compatible surface accepts.
+    ("openrouter/", "low"),
+)
+
+
+def reasoning_effort_for(model: str, requested: str | None) -> str | None:
+    """Translate "minimal thinking" into the value this provider actually accepts.
+
+    Only the "none" request is translated. An explicit ``low``/``medium``/``high`` is a caller
+    asking for real deliberation and is passed through untouched.
+    """
+    if requested != DEFAULT_REASONING_EFFORT:
+        return requested
+    for prefix, value in _MINIMAL_REASONING:
+        if model.startswith(prefix):
+            return value
+    return requested
+
 # litellm raises on a parameter a provider does not support. Our routes span three providers with
 # different capabilities, so a param meant for one must not break the fallback to another.
 DROP_UNSUPPORTED_PARAMS = True
@@ -377,7 +407,11 @@ def complete(
                     max_tokens=max_tokens,
                     timeout=REQUEST_TIMEOUT_SECONDS,
                     **({"response_format": response_format} if response_format else {}),
-                    **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
+                    **(
+                        {"reasoning_effort": effort}
+                        if (effort := reasoning_effort_for(model, reasoning_effort))
+                        else {}
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 - litellm raises a wide provider-specific tree
                 last_error = exc

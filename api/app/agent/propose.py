@@ -41,6 +41,10 @@ TIER_BY_ATTEMPT: dict[int, int] = {1: 1, 2: 2, 3: 3}
 #: Beyond this the ladder stops climbing. Tier 4 exists but is reserved for a human.
 MAX_AGENT_TIER = 3
 
+#: Used only when a caller does not supply the merchant's own cap. Matches the column default so
+#: a missing argument cannot silently make the agent more aggressive than the merchant allows.
+DEFAULT_LIFETIME_TOUCH_CAP = 6
+
 _SYSTEM = (
     "You are a B2B receivables agent for an Indian business. You propose exactly ONE next action "
     "for an unpaid invoice, chosen from a closed list of tools. You never send anything yourself; "
@@ -70,7 +74,13 @@ def tier_for_attempt(attempt: int) -> int:
     return TIER_BY_ATTEMPT.get(attempt, MAX_AGENT_TIER)
 
 
-def policy_action(invoice: Invoice, cause: UnpaidCause, channel: Channel) -> ProposedAction:
+def policy_action(
+    invoice: Invoice,
+    cause: UnpaidCause,
+    channel: Channel,
+    *,
+    lifetime_touch_cap: int = DEFAULT_LIFETIME_TOUCH_CAP,
+) -> ProposedAction:
     """The deterministic policy. Always returns an action; never raises.
 
     This is the entire product when every model provider is down, so it is written to be readable
@@ -107,19 +117,28 @@ def policy_action(invoice: Invoice, cause: UnpaidCause, channel: Channel) -> Pro
             channel=None,
         )
 
-    if attempt > MAX_AGENT_TIER:
+    # The agent's tone ladder tops out at tier 3, but "the ladder is exhausted" is a different
+    # claim from "never contact this counterparty again", and only the merchant's lifetime cap
+    # says the second one.
+    #
+    # An earlier version stopped permanently at attempt 4 regardless. With a lifetime cap of 6
+    # that retired receivables at *half* the permitted budget -- and the three highest-value
+    # invoices in the book were the ones it retired, because value correlates with how often they
+    # had already been chased. The most valuable accounts were the first the agent gave up on.
+    if invoice.touch_count >= lifetime_touch_cap:
         return ProposedAction(
             invoice_id=invoice.id,
             type=ActionType.STOP,
             tone_tier=1,
             rationale=(
-                f"{invoice.touch_count} touches already made; the agent's escalation ladder is "
-                "exhausted and further contact is a human decision."
+                f"{invoice.touch_count} touches made against a lifetime cap of "
+                f"{lifetime_touch_cap}; stopping permanently."
             ),
             channel=None,
         )
 
-    # The policy must obey the same registry the model's proposals are validated against.
+    # The policy must obey the same registry the model's proposals are validated against, and this
+    # guard has to sit above every branch that proposes outreach -- not just the ordinary one.
     # Otherwise the deterministic path -- the one that runs when every provider is down -- is the
     # only path that can propose an illegal transition, which is precisely backwards.
     if not registry.transition_allowed(ActionType.SEND_MESSAGE, state):
@@ -131,6 +150,23 @@ def policy_action(invoice: Invoice, cause: UnpaidCause, channel: Channel) -> Pro
                 f"recovery_state={state} does not permit outreach; leaving this account alone."
             ),
             channel=None,
+        )
+
+    if attempt > MAX_AGENT_TIER:
+        # Still within the touch budget, but past the agent's tone ceiling. Propose the message at
+        # tier 3 and let the gate route it: check 5 refuses anything at or above the approval tier
+        # with "human approval required", which puts the account in the approval queue *as a
+        # refusal carrying its reason*. That is the designed escalation path -- a human decides
+        # whether to press harder, and the decision is on the record either way.
+        return ProposedAction(
+            invoice_id=invoice.id,
+            type=ActionType.SEND_MESSAGE,
+            tone_tier=MAX_AGENT_TIER,
+            rationale=(
+                f"Attempt {attempt} is past the agent's tone ceiling; escalating further needs a "
+                "human, so this goes to the approval queue rather than stopping."
+            ),
+            channel=channel,
         )
 
     reason = {
@@ -249,9 +285,15 @@ def llm_action(
     return candidate, response.model, None
 
 
-def propose(invoice: Invoice, cause: UnpaidCause, *, channel: Channel = Channel.EMAIL) -> Proposal:
+def propose(
+    invoice: Invoice,
+    cause: UnpaidCause,
+    *,
+    channel: Channel = Channel.EMAIL,
+    lifetime_touch_cap: int = DEFAULT_LIFETIME_TOUCH_CAP,
+) -> Proposal:
     """One action for this invoice. The deterministic answer unless the model beats it."""
-    fallback = policy_action(invoice, cause, channel)
+    fallback = policy_action(invoice, cause, channel, lifetime_touch_cap=lifetime_touch_cap)
 
     candidate, origin, failure = llm_action(invoice, cause, channel)
     if candidate is None:
@@ -271,6 +313,7 @@ def propose(invoice: Invoice, cause: UnpaidCause, *, channel: Channel = Channel.
 
 
 __all__ = [
+    "DEFAULT_LIFETIME_TOUCH_CAP",
     "MAX_AGENT_TIER",
     "TIER_BY_ATTEMPT",
     "Proposal",

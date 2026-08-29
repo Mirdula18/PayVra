@@ -61,6 +61,7 @@ class RunRecovery:
     dry_run: bool
     accounts_considered: int
     actions_executed: int
+    actions_approved: int
     actions_refused: int
     causal: RecoveryFigure
     time_window: RecoveryFigure
@@ -181,6 +182,7 @@ def recovery_for_run(db: Session, recovery_run_id: uuid.UUID) -> RunRecovery:
         dry_run=run.dry_run,
         accounts_considered=run.accounts_considered,
         actions_executed=run.actions_executed,
+        actions_approved=run.actions_approved,
         actions_refused=run.actions_refused,
         causal=_summarise(db, "causal", causal_rows),
         time_window=_summarise(db, "time_window", window_rows),

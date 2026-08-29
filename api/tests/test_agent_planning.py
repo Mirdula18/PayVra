@@ -156,11 +156,61 @@ def test_a_refusal_stops_permanently(gate_invoice: Invoice) -> None:
     assert action.type is ActionType.STOP
 
 
-def test_an_exhausted_ladder_stops_rather_than_escalating_further(gate_invoice: Invoice) -> None:
-    """Beyond tier 3 the next move is a human's, not a firmer message."""
+def test_the_lifetime_cap_is_what_stops_permanently_not_the_tone_ladder(
+    gate_invoice: Invoice,
+) -> None:
+    """Only the merchant's cap ends an account. The tone ladder running out does not.
+
+    An earlier version stopped at attempt 4 regardless of the cap, retiring receivables at half
+    the permitted budget -- and the highest-value invoices first, because value correlates with
+    how often they had already been chased.
+    """
+    gate_invoice.recovery_state = RecoveryState.CHASING.value
     gate_invoice.touch_count = 6
-    action = propose_mod.policy_action(gate_invoice, UnpaidCause.UNKNOWN, Channel.EMAIL)
+    action = propose_mod.policy_action(
+        gate_invoice, UnpaidCause.UNKNOWN, Channel.EMAIL, lifetime_touch_cap=6
+    )
     assert action.type is ActionType.STOP
+
+
+def test_past_the_tone_ceiling_but_under_the_cap_goes_to_a_human(
+    gate_invoice: Invoice,
+) -> None:
+    """Attempt 4 of 6: escalate to the approval queue, do not retire the account.
+
+    The gate refuses a tier-3 action as "human approval required", which is a refusal carrying its
+    reason -- the designed escalation path. Stopping instead would silently discard a live
+    receivable a human never got to see.
+    """
+    gate_invoice.recovery_state = RecoveryState.CHASING.value
+    gate_invoice.touch_count = 3
+    action = propose_mod.policy_action(
+        gate_invoice, UnpaidCause.UNKNOWN, Channel.EMAIL, lifetime_touch_cap=6
+    )
+    assert action.type is ActionType.SEND_MESSAGE
+    assert action.tone_tier == propose_mod.MAX_AGENT_TIER
+
+
+def test_a_high_value_invoice_at_attempt_four_is_not_retired(gate_invoice: Invoice) -> None:
+    """The exact shape of the bug: INV-2026-1079, ₹14L, 3 touches, cap 6."""
+    gate_invoice.recovery_state = RecoveryState.ESCALATED.value
+    gate_invoice.touch_count = 3
+    gate_invoice.outstanding_paise = 14_00_00_000
+    action = propose_mod.policy_action(
+        gate_invoice, UnpaidCause.WRONG_CONTACT, Channel.EMAIL, lifetime_touch_cap=6
+    )
+    assert action.type is not ActionType.STOP
+
+
+def test_the_ceiling_branch_still_respects_the_registry(gate_invoice: Invoice) -> None:
+    """Past the tone ceiling *and* in a state that forbids outreach: snooze, not send."""
+    gate_invoice.recovery_state = RecoveryState.HUMAN_REVIEW.value
+    gate_invoice.touch_count = 4
+    action = propose_mod.policy_action(
+        gate_invoice, UnpaidCause.UNKNOWN, Channel.EMAIL, lifetime_touch_cap=6
+    )
+    ok, reason = propose_mod.validate(action, gate_invoice)
+    assert ok, reason
 
 
 def test_the_policy_never_proposes_an_illegal_transition(gate_invoice: Invoice) -> None:

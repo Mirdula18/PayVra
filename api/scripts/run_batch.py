@@ -83,6 +83,8 @@ def print_run(result: runner.RunResult, merchant: Merchant) -> None:
     print(f"  refused         : {result.refused}")
     if result.errored:
         print(f"  errors          : {result.errored}")
+    by_ai = sum(1 for a in result.accounts if a.proposal_source == "llm")
+    print(f"  proposed by AI  : {by_ai} of {len(result.accounts)}   (rest by deterministic policy)")
 
     print()
     print(DIVIDER)
@@ -98,8 +100,11 @@ def print_run(result: runner.RunResult, merchant: Merchant) -> None:
         }.get(account.outcome, "????")
         tier = f"t{account.tone_tier}" if account.tone_tier else "--"
         attempt = f"#{account.attempt}" if account.attempt else "--"
+        # Who proposed it. The whole ADR-001 claim is "the LLM proposes, deterministic code
+        # disposes", and it is unverifiable from the outside unless the source is on screen.
+        source = {"llm": "AI ", "policy": "pol"}.get(account.proposal_source or "", "-- ")
         print(
-            f"  [{mark}] {account.invoice_number:<16} {attempt:<3} {tier:<3} "
+            f"  [{mark}] {account.invoice_number:<16} {attempt:<3} {tier:<3} {source} "
             f"{account.action_type or '-':<20} cause={account.cause or '-'}"
         )
         if account.reason:

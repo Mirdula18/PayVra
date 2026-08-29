@@ -280,6 +280,47 @@ def verify_hinglish(ctx: MessageContext, checks: Checks, *, show_body: bool) -> 
     show(message, enabled=show_body)
 
 
+def verify_every_route(checks: Checks, *, credentials_ok: bool) -> None:
+    """Each job must reach its *own* primary model, not silently fall through to another.
+
+    ADR-003 routes classification, extraction and proposal to Groq first and drafting to Gemini.
+    Sending ``reasoning_effort="none"`` everywhere made every Groq call fail three times and fall
+    through to Gemini, so Groq was dead for the three jobs it is the primary for -- and nothing
+    noticed, because this script only ever exercised drafting. A per-job check is what makes a
+    dead route visible instead of merely slow.
+    """
+    print()
+    print(DIVIDER)
+    print("7 -- every job reaches its own primary model")
+    print(DIVIDER)
+    if not credentials_ok:
+        print("  skipped: no usable provider key.")
+        return
+
+    for job in (LLMJob.PROPOSAL, LLMJob.CLASSIFICATION, LLMJob.EXTRACTION, LLMJob.DRAFTING):
+        expected = llm.MODEL_ROUTES[job][0]
+        if llm.api_key_for(expected) is None:
+            print(f"  [skip] {job.value:<14} no key for {expected}")
+            continue
+        try:
+            with llm.worker_path():
+                response = llm.complete(
+                    'Reply with compact JSON: {"ok":true}',
+                    job=job,
+                    system="Reply with JSON only.",
+                    max_tokens=800,
+                    response_format={"type": "json_object"},
+                )
+        except LLMUnavailable as exc:
+            checks.check(False, f"{job.value} reaches a model", str(exc))
+            continue
+        checks.check(
+            response.model == expected,
+            f"{job.value} used its primary model",
+            f"expected {expected}, got {response.model}",
+        )
+
+
 def verify_fallback(ctx: MessageContext, checks: Checks) -> None:
     """FR-8.4 and invariant 9: a broken model degrades, it does not raise."""
     print()
@@ -360,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
             print("  Skipping the live-model checks: no usable provider key, or LLM_ENABLED=false.")
             print("  The template path above is what CI proves; this is the half it cannot.")
 
+        verify_every_route(checks, credentials_ok=credentials_ok)
         verify_fallback(ctx, checks)
         verify_request_path_guard(ctx, checks)
     finally:

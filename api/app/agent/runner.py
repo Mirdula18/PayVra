@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agent import diagnose as diagnose_mod
@@ -44,12 +44,17 @@ from app.enums import (
     PaymentStatus,
     RecoveryRunStatus,
     RecoveryState,
+    StopReason,
+    UnpaidCause,
 )
 from app.exceptions import PayvraError
 from app.generation import drafter
 from app.generation.context import ContextIncomplete, build_context
+from app.guardrails import stopping
 from app.guardrails.gate import gate
 from app.models.action import Action
+from app.models.consent import Consent
+from app.models.counterparty import Counterparty
 from app.models.invoice import Invoice
 from app.models.merchant import Merchant
 from app.models.recovery_run import RecoveryRun
@@ -280,6 +285,51 @@ def _run_audit(
     )
 
 
+def _stop_reason(
+    db: Session, merchant: Merchant, invoice: Invoice, cause: UnpaidCause
+) -> str:
+    """Why this invoice is being stopped, for the exception list (FR-14.4).
+
+    Derived from :mod:`app.guardrails.stopping` -- the same evaluator gate check 7 uses -- so the
+    reason on the invoice and the reason in a gate verdict can never disagree. Without this the
+    runner set ``recovery_state = stopped`` and left ``stop_reason`` null, which put accounts on
+    the exception list unable to say why they were there. An exception list that cannot explain
+    itself is not evidence of anything.
+
+    Falls back to the diagnosed cause when no *rule* fired: the agent stopping because its ladder
+    ran out is a real reason, just not one of the seven stopping rules.
+    """
+    opted_out = bool(
+        db.execute(
+            select(func.count())
+            .select_from(Consent)
+            .where(
+                Consent.counterparty_id == invoice.counterparty_id,
+                Consent.revoked_at.is_not(None),
+            )
+        ).scalar_one()
+    )
+    counterparty = db.get(Counterparty, invoice.counterparty_id)
+    decision = stopping.evaluate(
+        payment_status=invoice.payment_status,
+        recovery_state=invoice.recovery_state,
+        stop_reason=invoice.stop_reason,
+        touch_count=invoice.touch_count or 0,
+        lifetime_touch_cap=merchant.lifetime_touch_cap,
+        broken_promise_count=(counterparty.broken_promise_count if counterparty else 0) or 0,
+        counterparty_opted_out=opted_out,
+        counterparty_quarantined=bool(counterparty and counterparty.is_quarantined),
+        counterparty_excluded=bool(counterparty and counterparty.is_excluded),
+        merchant_paused=merchant.is_paused,
+        inferred_cause=cause.value,
+    )
+    if decision.stop_reason:
+        return str(decision.stop_reason)
+    if cause is UnpaidCause.REFUSAL:
+        return StopReason.OPTED_OUT.value
+    return StopReason.TOUCH_CAP_REACHED.value
+
+
 def _tone_tier(value: int) -> ToneTier:
     """Narrow a validated tier to the literal type the generation layer takes.
 
@@ -336,7 +386,9 @@ def _process_account(
     counterparty = diagnose_mod.resolve_counterparty(db, invoice)
     diagnosis = diagnose_mod.diagnose(db, invoice, counterparty)
     attempt = propose_mod.attempt_number(invoice)
-    proposal = propose_mod.propose(invoice, diagnosis.cause)
+    proposal = propose_mod.propose(
+        invoice, diagnosis.cause, lifetime_touch_cap=merchant.lifetime_touch_cap
+    )
     action = proposal.action
 
     result = AccountResult(
@@ -509,6 +561,8 @@ def _process_account(
         tool = propose_mod.registry.get(action.type)
         if tool.transitions_to is not None:
             invoice.recovery_state = tool.transitions_to.value
+        if tool.transitions_to is RecoveryState.STOPPED:
+            invoice.stop_reason = _stop_reason(db, merchant, invoice, diagnosis.cause)
 
     # touch_count is deliberately NOT incremented for an undelivered message. It feeds the
     # frequency cap, which counts *contacts* -- inflating it with drafts nobody received would
@@ -632,6 +686,7 @@ def run(
             [a for a in result.accounts if a.action_type is not None]
         )
         run_row.actions_executed = result.executed
+        run_row.actions_approved = result.approved
         run_row.actions_refused = result.refused
         result.finished_at = run_row.finished_at
         db.commit()

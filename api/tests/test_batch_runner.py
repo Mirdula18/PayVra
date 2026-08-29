@@ -295,6 +295,24 @@ def test_an_undelivered_message_does_not_count_as_a_touch(
     assert chaseable.touch_count == before
 
 
+def test_a_stopped_invoice_records_why_it_was_stopped(
+    db_session: Session, gate_merchant: Merchant, chaseable: Invoice, stub_razorpay: None
+) -> None:
+    """FR-14.4: the exception list must be able to explain itself.
+
+    The runner previously set ``recovery_state = stopped`` and left ``stop_reason`` null, so
+    accounts landed on the exception list unable to say why they were there.
+    """
+    chaseable.touch_count = gate_merchant.lifetime_touch_cap
+    db_session.flush()
+
+    runner.run(db_session, gate_merchant.id, dry_run=False, now=MIDDAY_IST, limit=1)
+
+    db_session.refresh(chaseable)
+    assert chaseable.recovery_state == RecoveryState.STOPPED.value
+    assert chaseable.stop_reason, "an exception-list entry with no reason explains nothing"
+
+
 def test_a_completed_state_change_is_recorded_as_executed(
     db_session: Session, gate_merchant: Merchant, chaseable: Invoice, stub_razorpay: None
 ) -> None:

@@ -52,6 +52,12 @@ class RecoveryRun(Base):
     actions_executed: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), nullable=False
     )
+    # Outbound actions the gate allowed but which were never delivered -- there is no transport
+    # yet. Counted separately from executed so the summary never implies a send that did not
+    # happen, and never loses the account either.
+    actions_approved: Mapped[int] = mapped_column(
+        Integer, server_default=text("0"), nullable=False
+    )
     actions_refused: Mapped[int] = mapped_column(Integer, server_default=text("0"), nullable=False)
 
     created_at: Mapped[datetime] = created_at_col()
