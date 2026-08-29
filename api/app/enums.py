@@ -91,6 +91,19 @@ class StopReason(StrEnum):
     WRITTEN_OFF = "written_off"
 
 
+class RecoveryRunStatus(StrEnum):
+    """Lifecycle of one batch-runner pass (ADR-009).
+
+    ``failed`` exists so an interrupted run is distinguishable from one that finished with nothing
+    to do. A run that crashed and a run that found no eligible accounts both leave zero executed
+    actions, and a recovery figure must never quietly attribute the first to the second.
+    """
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class ActorType(StrEnum):
     AGENT = "agent"
     HUMAN = "human"
@@ -156,6 +169,7 @@ ENUM_COLUMNS: dict[tuple[str, str], type[StrEnum]] = {
     ("audit_log", "actor"): ActorType,
     ("batches", "status"): BatchStatus,
     ("batch_rows", "status"): BatchRowStatus,
+    ("recovery_runs", "status"): RecoveryRunStatus,
 }
 
 

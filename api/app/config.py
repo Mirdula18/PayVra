@@ -34,6 +34,32 @@ class Settings(BaseSettings):
     # Must be reachable by a recipient: a localhost opt-out link is not an opt-out mechanism.
     public_base_url: str = "http://localhost:8000"
 
+    # --- Batch runner (Phase 6, ADR-009) ---
+
+    # How many worklist rows one run may touch by default. Small on purpose: a run creates real
+    # Razorpay links against a 25-link budget (razorpay/links.py), so the budget is the binding
+    # constraint, not runtime.
+    batch_run_default_limit: int = 5
+
+    # Widens the contact-hours window for a run, and ONLY by explicit environment variable
+    # (FR-16.8). Both must be set together or neither applies.
+    #
+    # This is not a bypass. Gate check 1 still executes and still refuses anything outside the
+    # window it is given -- the window is a value the check reads, never a rule it can be told to
+    # skip. An active override is written to the audit log and stamped on the recovery_runs row,
+    # so an out-of-window run is compliant *by record*: a reader can see the window was widened
+    # rather than having to take someone's word that it was not.
+    #
+    # Rehearsing inside 08:00-19:00 IST remains the recommended path. See the Phase 9 runbook.
+    contact_window_override_start: int | None = None
+    contact_window_override_end: int | None = None
+
+    # Razorpay refuses payment links above a maximum amount, measured between Rs 5L and Rs 14L on
+    # the live test account (ADR-006). Links are capped at this value and collected in tranches
+    # with accept_partial, so an over-ceiling invoice fails predictably here rather than as a 400
+    # mid-run on the highest-value account in the worklist.
+    link_amount_ceiling_paise: int = 50_000_000  # Rs 5,00,000
+
     # Agent / LLM
     llm_enabled: bool = False
     reply_confidence_threshold: float = 0.70
