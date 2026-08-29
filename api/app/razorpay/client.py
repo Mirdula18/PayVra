@@ -41,6 +41,13 @@ TEST_KEY_PREFIX = "rzp_test_"
 # expires in five minutes, so a long retry ladder would fail the send on staleness anyway.
 MAX_ATTEMPTS = 3
 BACKOFF_BASE_SECONDS = 0.5
+
+# Rate limiting. A 4xx by status, a "try again shortly" by meaning.
+TOO_MANY_REQUESTS = 429
+
+# Razorpay could in principle ask us to wait a very long time; a batch run should give up and
+# requeue rather than block on it.
+RETRY_AFTER_CEILING_SECONDS = 10.0
 BACKOFF_MAX_SECONDS = 4.0
 REQUEST_TIMEOUT_SECONDS = 10.0
 
@@ -202,6 +209,30 @@ class RazorpayClient:
                 self.breaker.record_success()
                 return dict(response.json()) if response.content else {}
 
+            if response.status_code == TOO_MANY_REQUESTS:
+                # 429 is a 4xx but is emphatically NOT "our request is malformed" -- it is "slow
+                # down", and the same request will succeed shortly. Retrying is the documented
+                # behaviour (NFR-3.4) and the batch runner depends on it: a run creating several
+                # links in quick succession hits this, and treating it as a permanent failure
+                # loses those accounts for the whole run.
+                #
+                # Honour Retry-After when Razorpay sends one; it knows its own window better than
+                # our backoff curve does.
+                retry_after = _retry_after_seconds(response)
+                last_error = RazorpayServerError(f"Razorpay 429 (rate limited) on {path}")
+                logger.warning(
+                    "razorpay 429 path=%s attempt=%d/%d retry_after=%s",
+                    path,
+                    attempt,
+                    MAX_ATTEMPTS,
+                    retry_after,
+                )
+                if retry_after is not None:
+                    time.sleep(min(retry_after, RETRY_AFTER_CEILING_SECONDS))
+                else:
+                    self._sleep_before_retry(attempt)
+                continue
+
             if response.status_code < 500:
                 # 4xx. Our fault. Do not retry, and do not count toward the breaker: the API is
                 # healthy, we are the ones sending something wrong.
@@ -256,6 +287,23 @@ class RazorpayClient:
 
     def cancel(self, link_id: str) -> dict[str, Any]:
         return self.request("POST", f"/payment_links/{link_id}/cancel")
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """``Retry-After`` in seconds, if Razorpay sent a usable one.
+
+    Only the delta-seconds form is honoured. The HTTP-date form is legal but needs clock-skew
+    handling to be safe, and guessing wrong here means either hammering a rate limit or stalling
+    a run -- so an unparseable value falls back to our own backoff instead.
+    """
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        seconds = float(raw.strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
 
 
 def _extract_error(response: httpx.Response) -> dict[str, Any]:

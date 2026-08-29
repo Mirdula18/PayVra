@@ -14,6 +14,19 @@ Reconciliation is unaffected by the suffix. ``_match_invoice`` resolves the stor
 and ``notes.invoice_id`` second, both of which are exact regardless of reference, and its
 ``reference_id`` fallback strips the suffix before matching.
 
+**RETRY: the suffix is a guess, and it must be self-correcting.** ``next_reference_id`` counts
+*local* ``payment_links`` rows, but uniqueness is enforced on *Razorpay's* side. Any local reset --
+a reseed, a restored dump, a fresh developer machine -- resets the counter while Razorpay still
+remembers every reference ever used, so the guess is then wrong for every invoice that has ever
+had a link. Worse, a failed create writes no row, so the count never advances and the invoice can
+*never* be collected again.
+
+That is the demo-day sequence exactly: seed a clean database, then watch every previously-used
+invoice 400. So ``create_link`` catches the duplicate-reference rejection and retries with the next
+suffix until Razorpay accepts. Found by the Phase 6 batch runner after a reseed;
+``verify_razorpay`` could not have caught it, because it only ever probes one invoice within a
+single account lifetime.
+
 **Test-mode link budget.** Razorpay caps standard Payment Links at 30 per business in test mode,
 and that cap is what the demo runs on. Four things keep us under it:
 
@@ -42,11 +55,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.clock import now_utc
+from app.config import settings
 from app.exceptions import PayvraError
 from app.models.contact import Contact
 from app.models.invoice import Invoice
 from app.models.payment_link import PaymentLink
-from app.razorpay.client import RazorpayClient, idempotency_key
+from app.razorpay.client import RazorpayClient, RazorpayClientError, idempotency_key
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +86,11 @@ LIVE_LINK_STATUSES = ("created", "partially_paid")
 
 # Separates the invoice number from the regeneration counter in a reference_id (FR-9.4).
 REGENERATION_SUFFIX = "-R"
+
+# How many suffixes to try before giving up on finding a free reference_id. Generous: each attempt
+# is one rejected call, and the alternative to converging is an invoice that can never be
+# collected again.
+REFERENCE_COLLISION_ATTEMPTS = 12
 
 # Only a trailing "-R" plus digits is a suffix we generated. Anchored so an invoice number that
 # legitimately ends in something like "-R" without a counter is left alone.
@@ -112,6 +131,31 @@ def links_used(db: Session, merchant_id: uuid.UUID) -> int:
     )
 
 
+def capped_amount(amount_paise: int) -> int:
+    """The amount a link may actually carry: ``min(requested, ceiling)`` (FR-9.8, FR-9.9).
+
+    Razorpay refuses a link above a maximum amount -- Rs 5L is accepted, Rs 14L is not (ADR-006).
+    The three highest-priority seeded invoices are all above it, so without this cap the run fails
+    with a 400 on precisely the accounts worth the most.
+
+    Capping here rather than at the call site means the failure mode is **a smaller link**, which
+    the FR-13.4 partial-payment path already reconciles, instead of an exception halfway through a
+    batch. An invoice above the ceiling is collected across successive links; each one settles a
+    tranche and the invoice stays ``partially_paid`` until the last lands, which is why recovery is
+    measured in rupees received rather than invoices closed (FR-17).
+    """
+    ceiling = settings.link_amount_ceiling_paise
+    if ceiling <= 0:  # a misconfigured ceiling must not silently block all collection
+        return amount_paise
+    return min(amount_paise, ceiling)
+
+
+def exceeds_ceiling(amount_paise: int) -> bool:
+    """Whether this amount would be capped. Lets a caller explain a tranche before creating it."""
+    ceiling = settings.link_amount_ceiling_paise
+    return ceiling > 0 and amount_paise > ceiling
+
+
 def next_reference_id(db: Session, invoice: Invoice) -> str:
     """The ``reference_id`` for the next link on this invoice. Unique per link, per FR-9.4.
 
@@ -135,6 +179,27 @@ def next_reference_id(db: Session, invoice: Invoice) -> str:
     if existing == 0:
         return invoice.invoice_number
     return f"{invoice.invoice_number}{REGENERATION_SUFFIX}{existing + 1}"
+
+
+def bump_reference_id(reference_id: str) -> str:
+    """The next candidate after ``reference_id``. ``INV-1`` -> ``INV-1-R2`` -> ``INV-1-R3``."""
+    match = _REGENERATION_RE.search(reference_id)
+    if match is None:
+        return f"{reference_id}{REGENERATION_SUFFIX}2"
+    current = int(match.group(0)[len(REGENERATION_SUFFIX) :])
+    return f"{base_reference_id(reference_id)}{REGENERATION_SUFFIX}{current + 1}"
+
+
+def is_duplicate_reference(exc: RazorpayClientError) -> bool:
+    """Whether this 4xx is Razorpay saying the reference_id is taken.
+
+    Matched on the message because Razorpay returns a generic ``BAD_REQUEST_ERROR`` code for it,
+    shared with genuinely malformed payloads -- and retrying one of those would be pointless. Both
+    markers are required so a differently-worded 400 falls through and raises, which is the safe
+    direction: a missed retry is one failed account, a wrong retry is a loop.
+    """
+    message = str(exc).lower()
+    return "reference_id" in message and "already exists" in message
 
 
 def base_reference_id(reference_id: str) -> str:
@@ -222,9 +287,23 @@ def create_link(
     unique constraint is the control and application logic is not (ADR-006). The key also travels
     as ``X-Razorpay-Idempotency-Key`` so Razorpay can deduplicate on its side too.
     """
-    amount = amount_paise if amount_paise is not None else invoice.outstanding_paise
-    if amount <= 0:
-        raise ValueError(f"cannot create a link for {amount} paise on {invoice.invoice_number}")
+    requested = amount_paise if amount_paise is not None else invoice.outstanding_paise
+    if requested <= 0:
+        raise ValueError(f"cannot create a link for {requested} paise on {invoice.invoice_number}")
+
+    # Capped before the idempotency key is derived, so a repeat request for the same over-ceiling
+    # invoice resolves to the same tranche rather than creating a second one (FR-9.8, FR-9.9).
+    amount = capped_amount(requested)
+    if amount != requested:
+        logger.info(
+            "capping link invoice=%s requested=%d ceiling=%d (collecting in tranches)",
+            invoice.invoice_number,
+            requested,
+            amount,
+        )
+        # A capped link must accept partial payment, or the counterparty is handed a link for less
+        # than they owe with no way to pay the rest against it.
+        accept_partial = True
 
     key = idempotency_key(invoice.id, amount, purpose.value)
 
@@ -249,16 +328,42 @@ def create_link(
     if expiry < minimum:
         expiry = minimum
 
+    contact = _primary_contact(db, invoice)
     reference = next_reference_id(db, invoice)
-    payload = build_payload(
-        invoice,
-        _primary_contact(db, invoice),
-        amount_paise=amount,
-        expire_by=expiry,
-        accept_partial=accept_partial,
-        reference_id=reference,
-    )
-    response = client.create_payment_link(payload, idempotency=key)
+
+    # Razorpay owns reference_id uniqueness; we only guess at it from local rows. Any local reset
+    # -- a reseed, a restored dump, a fresh developer machine -- desynchronises the two, and the
+    # guess is then permanently wrong for every invoice that has ever had a link. Retrying with
+    # the next suffix is what makes the guess self-correcting. See RETRY note in the module
+    # docstring.
+    response: dict[str, object] | None = None
+    for _ in range(REFERENCE_COLLISION_ATTEMPTS):
+        payload = build_payload(
+            invoice,
+            contact,
+            amount_paise=amount,
+            expire_by=expiry,
+            accept_partial=accept_partial,
+            reference_id=reference,
+        )
+        try:
+            response = client.create_payment_link(payload, idempotency=key)
+            break
+        except RazorpayClientError as exc:
+            if not is_duplicate_reference(exc):
+                raise
+            taken = reference
+            reference = bump_reference_id(reference)
+            logger.info(
+                "reference_id %s already exists at Razorpay; retrying as %s", taken, reference
+            )
+    if response is None:
+        raise RazorpayClientError(
+            400,
+            f"could not find a free reference_id for {invoice.invoice_number} after "
+            f"{REFERENCE_COLLISION_ATTEMPTS} attempts",
+            code="REFERENCE_ID_EXHAUSTED",
+        )
 
     link = PaymentLink(
         id=uuid.uuid4(),
