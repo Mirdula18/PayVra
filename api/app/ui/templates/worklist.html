@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block body %}
+
+<h1>Worklist</h1>
+<p class="lede">
+  Ranked by <strong>recoverable money</strong> &mdash; probability of collection &times; amount
+  &times; urgency &mdash; not by age. Every row carries the reason for its position, which is what
+  separates this from an aging report.
+</p>
+
+<div class="filters">
+  <span class="chip on">{{ rows|length }} shown</span>
+  <span class="chip">{{ total_outstanding | rupees }} outstanding</span>
+  {% if unscored %}
+    <span class="chip" style="border-color:var(--warn);color:var(--warn)">
+      {{ unscored }} unscored &mdash; run the rescore
+    </span>
+  {% endif %}
+</div>
+
+{% if not rows %}
+  <div class="empty">No open invoices.</div>
+{% else %}
+<div class="scroll">
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Invoice</th>
+      <th>Counterparty</th>
+      <th class="num">Outstanding</th>
+      <th class="num">Days late</th>
+      <th class="num">Priority</th>
+      <th>State</th>
+      <th>Why this position</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for invoice, cp in rows %}
+    <tr>
+      <td class="mono">{{ loop.index }}</td>
+      <td class="mono">
+        {{ invoice.invoice_number }}
+        {% if invoice.crosses_msme_45 %}
+          <div><span class="pill pill-warn">MSME 45</span></div>
+        {% endif %}
+      </td>
+      <td>{{ cp.name }}</td>
+      <td class="num">{{ invoice.outstanding_paise | rupees }}</td>
+      <td class="num">{{ invoice.days_past_due }}</td>
+      <td class="num mono">
+        {% if invoice.priority_score is none %}
+          <span style="color:var(--muted)">&mdash;</span>
+        {% else %}
+          {{ '%.0f'|format(invoice.priority_score) }}
+        {% endif %}
+      </td>
+      <td>
+        {% if invoice.recovery_state == 'stopped' %}
+          <span class="pill pill-stop">stopped</span>
+        {% elif invoice.recovery_state == 'settled' %}
+          <span class="pill pill-ok">settled</span>
+        {% elif invoice.recovery_state == 'human_review' %}
+          <span class="pill pill-warn">human review</span>
+        {% else %}
+          <span class="pill pill-mute">{{ invoice.recovery_state }}</span>
+        {% endif %}
+        {% if invoice.stop_reason %}
+          <div class="mono" style="color:var(--stop);font-size:11px">{{ invoice.stop_reason }}</div>
+        {% endif %}
+      </td>
+      <td style="max-width:52ch">
+        {% if invoice.priority_reason %}
+          {{ invoice.priority_reason }}
+        {% else %}
+          <span style="color:var(--muted)">Not yet scored; the nightly rescore is pending.</span>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+{% endblock %}

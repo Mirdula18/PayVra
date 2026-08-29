@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.config import settings
 from app.exceptions import (
@@ -33,6 +33,7 @@ from app.exceptions import (
 from app.generation import llm
 from app.routers import batches, invoices, webhooks, worklist
 from app.scheduler.registry import build_scheduler, health_snapshot, register_jobs
+from app.ui import routes as ui_routes
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,10 @@ async def _mark_request_path(request: Request, call_next: Any) -> Any:
         return await call_next(request)
 
 
+# Server-rendered Phase 8 screens. No API_PREFIX: these are pages, not the versioned JSON API,
+# and they must stay separable from it — a UI route is never a contract anyone integrates against.
+app.include_router(ui_routes.router)
+
 app.include_router(batches.router, prefix=API_PREFIX)
 app.include_router(worklist.router, prefix=API_PREFIX)
 app.include_router(invoices.router, prefix=API_PREFIX)
@@ -88,7 +93,13 @@ def _envelope(code: str, message: str, details: dict[str, Any] | None = None) ->
 
 
 @app.exception_handler(PayvraError)
-async def payvra_error_handler(request: Request, exc: PayvraError) -> JSONResponse:
+async def payvra_error_handler(request: Request, exc: PayvraError) -> Any:
+    # A browser navigating to a page with no session should be shown the sign-in form, not a JSON
+    # error envelope. Only the UI surface behaves this way; the API still fails with 401 as its
+    # contract says, which is what the tenant-isolation tests pin down.
+    if isinstance(exc, AuthenticationError) and request.url.path.startswith("/ui"):
+        return RedirectResponse(url="/ui/login", status_code=303)
+
     for exc_type, (http_status, code) in _ERROR_MAP.items():
         if isinstance(exc, exc_type):
             return JSONResponse(status_code=http_status, content=_envelope(code, str(exc)))

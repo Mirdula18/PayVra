@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block body %}
+
+<h1>Audit log</h1>
+<p class="lede">
+  Every gate verdict, approved and refused, in one list. Each entry is hash-chained to the one
+  before it. <strong>Refusals are the point</strong> &mdash; what the system declined to send, and
+  the rule that stopped it.
+</p>
+
+<div class="filters">
+  <form method="get" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0">
+    <label for="run" style="color:var(--muted);font-size:13px">Run</label>
+    <select name="run" id="run" onchange="this.form.submit()">
+      <option value="">All runs</option>
+      {% for r in runs %}
+        <option value="{{ r.id }}" {% if run and r.id == run.id %}selected{% endif %}>
+          {{ r.started_at | ist }} IST
+          &mdash; {{ r.actions_executed + r.actions_approved }} acted / {{ r.actions_refused }} refused
+          {%- if r.dry_run %} (dry){% endif %}
+        </option>
+      {% endfor %}
+    </select>
+    {% if outcome %}<input type="hidden" name="outcome" value="{{ outcome }}">{% endif %}
+    <noscript><button type="submit">Go</button></noscript>
+  </form>
+
+  {% set base = '/ui/audit?run=' ~ (run.id if run else '') ~ ('&show_scoring=1' if show_scoring else '') %}
+  <a class="chip {% if not outcome %}on{% endif %}" href="{{ base }}">
+    All actions {{ total }}
+  </a>
+  <a class="chip {% if outcome == 'blocked' %}on{% endif %}" href="{{ base }}&outcome=blocked">
+    Refused by gate {{ counts.get('blocked', 0) }}
+  </a>
+  <a class="chip {% if outcome == 'refused' %}on{% endif %}" href="{{ base }}&outcome=refused">
+    Refused in run {{ counts.get('refused', 0) }}
+  </a>
+  <a class="chip {% if outcome == 'approved' %}on{% endif %}" href="{{ base }}&outcome=approved">
+    Approved {{ counts.get('approved', 0) }}
+  </a>
+  <a class="chip {% if outcome == 'executed' %}on{% endif %}" href="{{ base }}&outcome=executed">
+    Executed {{ counts.get('executed', 0) }}
+  </a>
+  <a class="chip {% if show_scoring %}on{% endif %}"
+     href="/ui/audit?run={{ run.id if run else '' }}{% if not show_scoring %}&show_scoring=1{% endif %}"
+     title="Scoring entries are audit records too (ADR-008 logs every feature vector), but they are not actions.">
+    {% if show_scoring %}Hide{% else %}Show{% endif %} scoring {{ scoring_total }}
+  </a>
+</div>
+
+{% if truncated %}
+<div class="note warn">
+  Showing the most recent {{ entries|length }} entries only. The counts above are over the whole
+  filtered set, not this page.
+</div>
+{% endif %}
+
+{% if run and run.window_overridden %}
+<div class="note warn">
+  <strong>Contact window was widened for this run</strong> &mdash;
+  {{ '%02d'|format(run.contact_hour_start) }}:00&ndash;{{ '%02d'|format(run.contact_hour_end) }}:00 IST
+  instead of the configured 08:00&ndash;19:00. The gate still evaluated every action against the
+  window in force; the override itself is recorded below, which is what keeps an out-of-window run
+  compliant by record rather than by assertion.
+</div>
+{% endif %}
+
+{% if not entries %}
+  <div class="empty">No audit entries{% if run %} for this run{% endif %}.</div>
+{% else %}
+<div class="scroll">
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Outcome</th>
+      <th>Action</th>
+      <th>Why</th>
+      <th>Gate</th>
+      <th>When</th>
+      <th>Chain</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for e in entries %}
+    {% set failed = e.gate_verdicts | selectattr('passed', 'equalto', false) | list %}
+    <tr>
+      <td class="mono">{{ e.id }}</td>
+      <td>
+        {% if e.outcome in ('blocked', 'refused') %}
+          <span class="pill pill-stop">{{ e.outcome }}</span>
+        {% elif e.outcome in ('executed',) %}
+          <span class="pill pill-ok">{{ e.outcome }}</span>
+        {% elif e.outcome in ('approved', 'approved_dry_run') %}
+          <span class="pill pill-warn">{{ e.outcome }}</span>
+        {% else %}
+          <span class="pill pill-mute">{{ e.outcome }}</span>
+        {% endif %}
+      </td>
+      <td class="mono">{{ e.action_type }}</td>
+      <td style="max-width:44ch">{{ e.rationale }}</td>
+      <td style="max-width:26ch">
+        {% if failed %}
+          {% for f in failed %}
+            <div><span class="pill pill-stop">{{ f.check }}</span></div>
+          {% endfor %}
+        {% elif e.gate_verdicts %}
+          <span class="pill pill-ok">all 7 passed</span>
+        {% else %}
+          <span style="color:var(--muted)">&mdash;</span>
+        {% endif %}
+      </td>
+      <td class="mono" style="white-space:nowrap">{{ e.created_at | ist('%d %b %H:%M:%S') }}</td>
+      <td class="mono" title="entry {{ e.entry_hash }}&#10;prev  {{ e.prev_hash }}">
+        {{ e.entry_hash[:8] }}<br>
+        <span style="color:var(--muted)">&larr; {{ e.prev_hash[:8] }}</span>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<p class="lede" style="margin-top:14px">
+  Each <code>Chain</code> cell shows this entry's hash over the hash of the entry before it. Altering
+  any row changes its hash and breaks every link after it, which is what makes the log
+  tamper-<em>evident</em>. Hover a cell for the full pair.
+</p>
+{% endif %}
+
+{% endblock %}

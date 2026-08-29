@@ -24,6 +24,10 @@ dependencies = [
   "openpyxl>=3.1,<4.0",        # XLSX parsing; CSV uses the stdlib
   "python-multipart>=0.0.9",   # multipart/form-data for POST /batches
   "httpx>=0.27",               # Razorpay REST client (also backs fastapi.testclient)
+  # Server-rendered Phase 8 screens. Declared explicitly rather than relied on transitively:
+  # litellm happens to pull it in, but ADR-003 requires the app to run with litellm uninstalled,
+  # and the UI must not be the thing that breaks in that configuration.
+  "jinja2>=3.1,<4.0",
   # LLM abstraction (ADR-003). generation/llm.py is the only importer, and it imports
   # lazily inside the call -- so LLM_ENABLED=false, the test suite and CI all run
   # correctly with this package absent.
