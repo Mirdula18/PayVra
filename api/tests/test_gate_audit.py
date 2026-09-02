@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.delivery.email import DeliveryNotConfigured
 from app.delivery.sender import GateNotPassedError, assert_sendable, send
 from app.enums import ActionType, Channel
 from app.guardrails.gate import gate
@@ -224,13 +225,18 @@ def test_send_refuses_a_stale_verdict(
 def test_a_passing_current_matching_verdict_reaches_the_transport(
     db_session: Session, gate_invoice: Invoice, gate_consent: Any
 ) -> None:
-    """The precondition passes; only the unimplemented Phase 4/5 transport stops it."""
+    """The precondition passes and the call reaches the transport.
+
+    It then stops at ``DeliveryNotConfigured`` rather than ``NotImplementedError``, because
+    Phase 6.5 wired Resend behind this and the suite disables it (see ``_no_real_email``). What
+    matters is *where* it stops: past ``assert_sendable``, at the provider — not at the gate.
+    """
     action = make_action(gate_invoice)
     verdict = gate(db_session, action, now=MIDDAY_IST)
     assert verdict.passed
 
     assert_sendable(action, verdict, now=MIDDAY_IST + timedelta(seconds=30))
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(DeliveryNotConfigured):
         send(action, verdict, now=MIDDAY_IST + timedelta(seconds=30))
 
 

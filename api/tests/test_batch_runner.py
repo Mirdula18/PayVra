@@ -14,7 +14,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta
 
-import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -36,7 +35,6 @@ from app.models.consent import Consent
 from app.models.invoice import Invoice
 from app.models.merchant import Merchant
 from app.models.recovery_run import RecoveryRun
-from app.razorpay.client import RazorpayClient
 
 pytestmark = pytest.mark.usefixtures("db_available")
 
@@ -73,36 +71,6 @@ def _run(db: Session, merchant: Merchant, **kw: object) -> runner.RunResult:
     kw.setdefault("now", MIDDAY_IST)
     result = runner.run(db, merchant.id, **kw)  # type: ignore[arg-type]
     return result
-
-
-@pytest.fixture()
-def stub_razorpay(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace the Razorpay transport for live-mode runs.
-
-    Without this a non-dry run reaches the real API, because ``.env`` carries working test-mode
-    credentials. A unit test must never depend on a third party being up, and must never spend
-    link budget.
-    """
-
-    def make() -> RazorpayClient:
-        def handler(request: httpx.Request) -> httpx.Response:
-            link_id = f"plink_{uuid.uuid4().hex[:12]}"
-            return httpx.Response(
-                200,
-                json={
-                    "id": link_id,
-                    "short_url": f"https://rzp.io/i/{link_id}",
-                    "status": "created",
-                },
-            )
-
-        client = RazorpayClient(key_id="rzp_test_stub", key_secret="s")
-        client._client = httpx.Client(
-            transport=httpx.MockTransport(handler), base_url="https://api.razorpay.test/v1"
-        )
-        return client
-
-    monkeypatch.setattr(runner, "RazorpayClient", make)
 
 
 # --- the run itself -----------------------------------------------------------------------------

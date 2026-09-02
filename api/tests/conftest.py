@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -15,6 +16,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import settings
 from app.db import SessionLocal
+from app.razorpay.client import RazorpayClient
 
 # How long the reachability probe waits before declaring the database unavailable. Short on
 # purpose: this is a "should I skip?" question, not a connection anyone will use.
@@ -56,6 +58,58 @@ def _probe_failure() -> str | None:
     finally:
         probe.dispose()
     return _probe_result  # type: ignore[return-value]
+
+
+@pytest.fixture()
+def stub_razorpay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the Razorpay transport for live-mode runs.
+
+    Without this a non-dry run reaches the real API, because ``.env`` carries working test-mode
+    credentials. A unit test must never depend on a third party being up, and must never spend
+    link budget.
+    """
+
+    def make() -> RazorpayClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            link_id = f"plink_{uuid.uuid4().hex[:12]}"
+            return httpx.Response(
+                200,
+                json={
+                    "id": link_id,
+                    "short_url": f"https://rzp.io/i/{link_id}",
+                    "status": "created",
+                },
+            )
+
+        client = RazorpayClient(key_id="rzp_test_stub", key_secret="s")
+        client._client = httpx.Client(
+            transport=httpx.MockTransport(handler), base_url="https://api.razorpay.test/v1"
+        )
+        return client
+
+    from app.agent import runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "RazorpayClient", make)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**Nothing in the test suite may send a real email. Ever.**
+
+    Not a preference. ``.env`` carries a working Resend key and a real override recipient, so the
+    moment a transport existed the runner tests began delivering to an actual inbox -- four or five
+    messages on the first full run after Phase 6.5 landed, before anyone noticed. A test that can
+    reach a provider will reach it, on every developer machine and in CI, and the failure is silent
+    because a successful send looks like a passing test.
+
+    Clearing the API key makes ``email.is_configured()`` false, so the transport refuses before it
+    builds a request. Tests that need to exercise delivery stub ``httpx.post`` and re-enable
+    configuration explicitly -- opting *in* per test, never inheriting it from the environment.
+    """
+    from app.delivery import email as email_mod
+
+    monkeypatch.setattr(email_mod.settings, "resend_api_key", "", raising=False)
+    monkeypatch.setattr(email_mod.settings, "resend_to_override", "", raising=False)
 
 
 @pytest.fixture()
@@ -133,6 +187,9 @@ def api_merchant(db_available: None) -> Iterator[uuid.UUID]:
                 "(SELECT id FROM invoices WHERE merchant_id = :m)"
             ),
             {"m": merchant_id},
+        )
+        session.execute(
+            text("UPDATE actions SET message_id = NULL WHERE merchant_id = :m"), {"m": merchant_id}
         )
         session.execute(
             text(
@@ -217,6 +274,10 @@ def gate_merchant(db_session: Session) -> Iterator[Any]:
     try:
         # FK order: children before parents.
         for statement in (
+            # actions.message_id and messages.action_id reference each other, so neither table
+            # can be deleted first. Breaking the link is the only order that works -- and it only
+            # became necessary once Phase 6.5 started populating message_id on a confirmed send.
+            "UPDATE actions SET message_id = NULL WHERE merchant_id = :m",
             "DELETE FROM messages WHERE action_id IN "
             "(SELECT id FROM actions WHERE merchant_id = :m)",
             "DELETE FROM actions WHERE merchant_id = :m",
