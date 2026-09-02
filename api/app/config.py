@@ -74,6 +74,23 @@ class Settings(BaseSettings):
 
     # Delivery providers
     resend_api_key: str = ""
+
+    # Resend's shared testing sender. Using it means no domain to buy and no DNS to verify -- and
+    # in exchange Resend will deliver only to the address the account is registered under. That
+    # constraint is the whole reason RESEND_TO_OVERRIDE exists.
+    resend_from: str = "onboarding@resend.dev"
+
+    # **Every outbound email goes here instead of the counterparty's real address.**
+    #
+    # Not a convenience. The seeded contacts are @example.co.in, a reserved undeliverable domain,
+    # and a demo database full of realistic-looking addresses is one config mistake away from
+    # mailing strangers about invoices they do not owe. Sending is only enabled at all when this is
+    # set, so the default state of the system is "cannot email anyone".
+    #
+    # Clearing it does not unlock real recipients; it disables sending. Real per-counterparty
+    # delivery needs a verified domain and a deliberate change here.
+    resend_to_override: str = ""
+
     msg91_api_key: str = ""
     whatsapp_token: str = ""
 

@@ -40,9 +40,10 @@ gate-to-send gap at roughly zero no matter how large the window is::
 That structure is also why :data:`VERDICT_MAX_AGE` stays at five minutes rather than being raised
 to accommodate a batch: the ceiling is not the constraint, the ordering is.
 
-The transport itself (Resend, MSG91, WhatsApp) lands in Phase 4/5. What exists now is the
-signature, because retrofitting a mandatory argument after callers exist is how "always call gate
-first" becomes a comment.
+**Phase 6.5 wired the email transport behind this** (FR-10.1, Resend). SMS and WhatsApp remain
+unimplemented and are refused explicitly rather than silently ignored. The signature and its
+precondition predate the transport on purpose: retrofitting a mandatory argument after callers
+exist is how "always call gate first" becomes a comment.
 
 **Who writes which audit entry.** ``gate()`` writes ``approved`` or ``blocked``. This module
 writes ``executed`` -- and only after the transport confirms the send. A gate verdict is
@@ -55,6 +56,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.clock import IST, now_utc
+from app.delivery import email
+from app.enums import Channel
 from app.exceptions import PayvraError
 from app.schemas.gate import GateVerdict, ProposedAction
 
@@ -99,15 +102,41 @@ def assert_sendable(
         )
 
 
-def send(action: ProposedAction, verdict: GateVerdict, *, now: datetime | None = None) -> None:
+def send(
+    action: ProposedAction,
+    verdict: GateVerdict,
+    *,
+    contact_email: str | None = None,
+    now: datetime | None = None,
+) -> email.SendResult:
     """Send the action's message. **Requires** a passing verdict for this exact action.
 
-    Transport is not implemented -- Phase 4/5 wires Resend, MSG91 and WhatsApp behind this. The
-    signature and its precondition exist now so that every future caller is written against them.
+    The precondition runs first and unconditionally: there is no argument, flag or code path that
+    reaches the transport without a passing, current, matching verdict in hand. That is the whole
+    reason this function takes the verdict rather than looking one up.
+
+    Returns the provider's receipt. **The caller records ``executed`` only on a returned result** --
+    never on the call being made. A raised :class:`~app.delivery.email.DeliveryError` means the
+    action stays approved and nothing is claimed, which is the direction the audit log is allowed
+    to be wrong in.
+
+    The message itself is on ``action.message``; an outbound action without one never reached here,
+    because gate check 6 fails an outbound action carrying no draft.
     """
     assert_sendable(action, verdict, now=now)
-    raise NotImplementedError(
-        "delivery transports land in Phase 4/5; the gate precondition above is Phase 3. "
-        "The implementation must write the audit entry with outcome='executed' only after the "
-        "transport confirms the send -- gate() has already written 'approved'."
+
+    if action.message is None:
+        # Defensive. Check 6 makes this unreachable, but "unreachable" and "cannot happen" are
+        # different claims, and the difference is what a stack trace at 3am is made of.
+        raise email.DeliveryError(f"action {action.type.value} has no drafted message to send")
+
+    if action.channel is not Channel.EMAIL:
+        raise email.DeliveryError(
+            f"{action.channel} delivery is not implemented; only email is (FR-10.1)"
+        )
+
+    return email.send_email(
+        to=email.recipient_for(contact_email),
+        subject=action.message.subject or "",
+        body=action.message.body,
     )
