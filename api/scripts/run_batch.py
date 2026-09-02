@@ -79,7 +79,9 @@ def print_run(result: runner.RunResult, merchant: Merchant) -> None:
         print("                    ^ WIDENED BY OVERRIDE -- recorded in the audit log")
     print(f"  accounts        : {len(result.accounts)}")
     print(f"  executed        : {result.executed}   (state changes that completed)")
-    print(f"  approved        : {result.approved}   (link + draft + gate pass, not delivered)")
+    print(f"  approved        : {result.approved}   (gate passed, not delivered)")
+    sent = sum(1 for a in result.accounts if a.delivered_to)
+    print(f"  emails sent     : {sent}")
     print(f"  refused         : {result.refused}")
     if result.errored:
         print(f"  errors          : {result.errored}")
@@ -111,6 +113,8 @@ def print_run(result: runner.RunResult, merchant: Merchant) -> None:
             print(f"         {account.reason}")
         if account.payment_link_url:
             print(f"         {account.payment_link_url}")
+        if account.delivered_to:
+            print(f"         email delivered to {account.delivered_to}")
 
 
 def print_recovery(rec: metrics.RunRecovery) -> None:

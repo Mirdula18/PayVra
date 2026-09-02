@@ -3,8 +3,11 @@
 One synchronous pass over the ranked worklist (ADR-009, FR-16):
 
     diagnose -> propose exactly ONE action -> gate
-             -> approved: create link, generate message, record executed
+             -> approved: create link, generate message, SEND, record executed
              -> refused:  persist the refusal with its reason, continue
+
+The send sits between the gate and the record, and it is what separates ``executed`` from
+``approved``: a message that Resend refuses leaves the action approved and claims nothing.
 
 The per-account order is fixed and is not an implementation detail:
 
@@ -23,6 +26,7 @@ Track 3 bar. A run with no refusals in it has demonstrated nothing about complia
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -37,6 +41,7 @@ from app.agent import propose as propose_mod
 from app.audit.log import record as audit_record
 from app.clock import IST, now_utc
 from app.config import settings
+from app.delivery import email, sender
 from app.enums import (
     ActionStatus,
     ActorType,
@@ -54,12 +59,15 @@ from app.guardrails import stopping
 from app.guardrails.gate import gate
 from app.models.action import Action
 from app.models.consent import Consent
+from app.models.contact import Contact
 from app.models.counterparty import Counterparty
 from app.models.invoice import Invoice
 from app.models.merchant import Merchant
+from app.models.message import Message
 from app.models.recovery_run import RecoveryRun
 from app.razorpay.client import RazorpayClient
 from app.razorpay.links import LinkBudgetExceeded, create_link
+from app.razorpay.links import _primary_contact as primary_contact
 from app.schemas.gate import CheckName, DraftMessage, ProposedAction
 from app.schemas.generation import ToneTier
 
@@ -67,19 +75,24 @@ logger = logging.getLogger(__name__)
 
 #: Outcome strings on the per-account result. Stable — the UI and the report read these.
 #:
-#: ``executed`` and ``approved`` are deliberately different things. A ``stop`` or ``snooze``
-#: genuinely completes: the state change is the whole action. An outbound message does not --
-#: there is no delivery transport yet (``delivery/sender.send`` raises ``NotImplementedError``;
-#: FR-10 is unbuilt), so the run creates a real payment link, drafts a real message and gets a real
-#: gate approval, and then stops.
+#: ``executed`` and ``approved`` are deliberately different things, and which one an outbound
+#: action gets is decided by the **transport**, not by the gate. A ``stop`` or ``snooze`` completes
+#: the moment its state change is written. A message completes only when Resend accepts it
+#: (Phase 6.5, FR-10.1).
 #:
-#: Calling that "executed" would be an over-claim, and ``guardrails/gate.py`` is explicit that the
-#: audit log may under-claim but must never over-claim. So it is recorded as ``approved``.
+#: So an outbound action whose send fails stays ``approved``: the gate allowed it, the link is
+#: real, the draft is real, and nothing went out. Calling that ``executed`` would be an over-claim,
+#: and ``guardrails/gate.py`` is explicit that the audit log may under-claim but must never
+#: over-claim.
 OUTCOME_EXECUTED = "executed"
 OUTCOME_APPROVED = "approved"
 OUTCOME_REFUSED = "refused"
 OUTCOME_SKIPPED = "skipped"
 OUTCOME_ERROR = "error"
+
+#: messages.delivery_status after the provider accepts. Not "delivered" -- acceptance by Resend is
+#: not proof of inbox arrival, and only a delivery receipt (FR-10.3, unbuilt) could say that.
+DELIVERY_SENT = "sent"
 
 #: Outcomes meaning "the run acted on this invoice and the gate allowed it". What causal recovery
 #: attribution keys on -- a created, live payment link is a real mechanism for payment even before
@@ -102,6 +115,7 @@ class AccountResult:
     blocked_by: list[str] = field(default_factory=list)
     reason: str | None = None
     payment_link_url: str | None = None
+    delivered_to: str | None = None
 
 
 @dataclass
@@ -341,9 +355,26 @@ def _tone_tier(value: int) -> ToneTier:
     return cast(ToneTier, clamped)
 
 
+@dataclass
+class Draft:
+    """A drafted message, the contact it is addressed to, and how it was produced.
+
+    The contact travels **with** the draft rather than being looked up again at send time. Both
+    ``razorpay.links`` and this module resolve a primary contact independently, and a second lookup
+    could pick a different row if a contact were marked stale between the two -- which would file
+    the ``messages`` row against a contact that never received anything. One resolution, carried
+    forward, is the only way the record and the reality cannot drift apart.
+    """
+
+    message: DraftMessage
+    contact: Contact | None
+    source: str
+    origin: str
+
+
 def _draft_for(
     db: Session, invoice: Invoice, action: ProposedAction, link_url: str | None
-) -> DraftMessage | None:
+) -> Draft | None:
     """Generate the message this action would send, if it sends one.
 
     Returns ``None`` for a non-outbound action -- there is nothing to draft, and check 6 exempts
@@ -361,16 +392,54 @@ def _draft_for(
         payment_link_url=link_url,
     )
     message = drafter.generate(ctx)
-    return DraftMessage(
-        channel=ctx.channel,
-        subject=message.subject,
-        body=message.body,
-        quoted_amount_paise=ctx.outstanding_paise,
-        quoted_invoice_number=ctx.invoice_number,
-        payment_link_url=ctx.payment_link_url,
-        opt_out_url=ctx.opt_out_url,
-        sender_name=ctx.merchant_name,
+    return Draft(
+        message=DraftMessage(
+            channel=ctx.channel,
+            subject=message.subject,
+            body=message.body,
+            quoted_amount_paise=ctx.outstanding_paise,
+            quoted_invoice_number=ctx.invoice_number,
+            payment_link_url=ctx.payment_link_url,
+            opt_out_url=ctx.opt_out_url,
+            sender_name=ctx.merchant_name,
+        ),
+        contact=primary_contact(db, invoice),
+        source=message.source,
+        origin=message.origin,
     )
+
+
+def _persist_message(
+    db: Session, *, action_row: Action, draft: Draft, result: email.SendResult | None
+) -> None:
+    """Record what was sent, to whom, and what the provider called it.
+
+    Written only on a confirmed send. A ``messages`` row with no ``provider_message_id`` would be a
+    claim that something went out with nothing to reconcile it against later.
+    """
+    if draft.contact is None or result is None:
+        return
+
+    body = draft.message.body
+    row = Message(
+        id=uuid.uuid4(),
+        action_id=action_row.id,
+        channel=draft.message.channel.value,
+        contact_id=draft.contact.id,
+        subject=draft.message.subject,
+        body=body,
+        language="en",
+        tone_tier=action_row.tone_tier or 1,
+        source=draft.source,
+        content_hash=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        validation_passed=True,
+        provider_message_id=result.provider_message_id,
+        delivery_status=DELIVERY_SENT,
+    )
+    db.add(row)
+    db.flush()
+    action_row.message_id = row.id
+    db.flush()
 
 
 def _process_account(
@@ -476,7 +545,8 @@ def _process_account(
                 return result
 
     try:
-        action = action.model_copy(update={"message": _draft_for(db, invoice, action, link_url)})
+        draft = _draft_for(db, invoice, action, link_url)
+        action = action.model_copy(update={"message": draft.message if draft else None})
     except ContextIncomplete as exc:
         result.outcome = OUTCOME_ERROR
         result.reason = f"could not build message context: {exc}"
@@ -527,7 +597,25 @@ def _process_account(
     # A live run stops here too for anything outbound, because there is nowhere to send it: FR-10
     # delivery is unbuilt. What genuinely completed is recorded as completed, and what did not is
     # recorded as approved. The difference is the whole reason the audit log is worth reading.
-    completed = not run.dry_run and not action.is_outbound
+    # Outbound actions are delivered here, between the gate and the record. A send that raises
+    # leaves `delivered` None and the action stays approved -- nothing is claimed, which is the
+    # only direction the audit log is allowed to be wrong in (guardrails/gate.py).
+    delivered: email.SendResult | None = None
+    delivery_failure: str | None = None
+    if action.is_outbound and not run.dry_run:
+        try:
+            delivered = sender.send(
+                action,
+                verdict,
+                contact_email=draft.contact.email if draft and draft.contact else None,
+                now=now,
+            )
+            result.delivered_to = delivered.to
+        except (email.DeliveryError, sender.GateNotPassedError) as exc:
+            delivery_failure = str(exc)
+            logger.warning("send failed invoice=%s: %s", invoice.invoice_number, exc)
+
+    completed = not run.dry_run and (not action.is_outbound or delivered is not None)
     if completed:
         status = ActionStatus.EXECUTED
     elif run.dry_run:
@@ -556,6 +644,9 @@ def _process_account(
         persisted.revoked_at = now
         db.flush()
 
+    if delivered is not None and draft is not None:
+        _persist_message(db, action_row=persisted, draft=draft, result=delivered)
+
     if completed:
         invoice.inferred_cause = diagnosis.cause.value
         tool = propose_mod.registry.get(action.type)
@@ -564,9 +655,13 @@ def _process_account(
         if tool.transitions_to is RecoveryState.STOPPED:
             invoice.stop_reason = _stop_reason(db, merchant, invoice, diagnosis.cause)
 
-    # touch_count is deliberately NOT incremented for an undelivered message. It feeds the
-    # frequency cap, which counts *contacts* -- inflating it with drafts nobody received would
-    # suppress future real outreach on the strength of messages that were never sent.
+    # touch_count counts *contacts*, so it moves only on a confirmed delivery. An undelivered
+    # draft must not inflate it -- that would suppress future real outreach on the strength of
+    # messages nobody received, and the frequency cap would be enforcing a fiction.
+    if delivered is not None:
+        invoice.touch_count = (invoice.touch_count or 0) + 1
+        invoice.current_tone_tier = max(invoice.current_tone_tier or 1, action.tone_tier)
+
     result.outcome = OUTCOME_EXECUTED if completed else OUTCOME_APPROVED
     _run_audit(
         db,
@@ -582,7 +677,12 @@ def _process_account(
             "cause": diagnosis.cause.value,
             "proposal_source": proposal.source,
             "dry_run": run.dry_run,
-            "delivered": False if action.is_outbound else None,
+            # Three states, not two. None means "nothing to deliver"; False plus a reason means the
+            # send was attempted and refused, which is a different fact from never trying.
+            "delivered": (delivered is not None) if action.is_outbound else None,
+            "provider_message_id": delivered.provider_message_id if delivered else None,
+            "delivered_to": delivered.to if delivered else None,
+            "delivery_failure": delivery_failure,
             "signals": diagnosis.signals.as_audit_payload(),
         },
     )
