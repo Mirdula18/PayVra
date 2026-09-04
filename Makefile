@@ -3,7 +3,7 @@
 # Postgres and Neon. See ADR-007.
 
 .DEFAULT_GOAL := help
-.PHONY: help install db-up db-down migrate seed seed-reset seed-demo dev web test lint typecheck fmt verify-razorpay inspect-webhook demo-link verify-llm tunnel
+.PHONY: help install up down logs shell db-up db-down migrate seed seed-reset seed-demo dev web test lint typecheck fmt verify-razorpay inspect-webhook demo-link verify-llm tunnel
 
 # --- venv layout differs on Windows vs POSIX ---
 VENV := .venv
@@ -25,9 +25,17 @@ ALEMBIC_INI := api/alembic.ini
 
 help:
 	@echo "PAYVRA make targets:"
+	@echo ""
+	@echo "  --- everything in Docker (nothing needed on the host but Docker) ---"
+	@echo "  up          Build, migrate and serve on http://localhost:8000"
+	@echo "  down        Stop the stack. KEEPS the data"
+	@echo "  logs        Follow the API log"
+	@echo "  shell       Shell inside the API container"
+	@echo ""
+	@echo "  --- host workflow (.venv), unchanged ---"
 	@echo "  install     Create .venv, install backend (editable) + web deps"
 	@echo "  db-up       Start Docker Postgres and run migrations to head"
-	@echo "  db-down     Stop and remove the Docker Postgres container"
+	@echo "  db-down     Stop the stack (same as down)"
 	@echo "  migrate     alembic upgrade head (against DATABASE_URL)"
 	@echo "  seed        Seed 120 invoices / 34 counterparties / 60 days history"
 	@echo "  seed-reset  Truncate all app tables, then reseed"
@@ -47,6 +55,26 @@ install:
 	$(PIP) install --upgrade pip
 	$(PIP) install -e ".[dev]"
 	cd web && npm install
+
+# --- the whole stack in Docker ---------------------------------------------------------
+# No .venv, no host Python, no host alembic. `up` blocks until the API reports healthy,
+# which it only does once /ui/login has round-tripped through Postgres.
+up:
+	docker compose up -d --build --wait
+	@echo ""
+	@echo "PAYVRA is up:  http://localhost:8000/ui/login"
+	@echo "Merchant token: c2d79cf5-7f9f-fff3-e0b0-c708a30f6f20"
+
+# Stops the containers and leaves the volume alone. NEVER add -v here: that deletes the
+# demo state, which cannot be reseeded (see the banner in docker-compose.yml).
+down:
+	docker compose down
+
+logs:
+	docker compose logs -f api
+
+shell:
+	docker compose exec api bash
 
 db-up:
 	docker compose up -d db

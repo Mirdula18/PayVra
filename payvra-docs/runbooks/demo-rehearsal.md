@@ -255,15 +255,37 @@ surface to get wrong, and every item below is about keeping it that short.
 
 ### A. Required — the demo as scripted
 
+**One command.** Postgres, the migrations and the API are all containers:
+
 ```powershell
 cd D:\PayVra
+docker compose up -d --build --wait
+```
+
+`--wait` returns only once `payvra-api` reports healthy, and that healthcheck fetches
+`/ui/login` — a real request through Postgres. A clean exit means the whole path is up, not that
+a port is open. Roughly 45 seconds cold, a few seconds warm.
+
+- [ ] `docker compose ps` shows `payvra-db` and `payvra-api` both `healthy`
+- [ ] `docker inspect payvra-migrate --format '{{.State.ExitCode}}'` is `0`
+
+<details>
+<summary>Host <code>.venv</code> alternative, if Docker is unavailable</summary>
+
+```powershell
 docker compose up -d db
 .venv\Scripts\alembic.exe -c api\alembic.ini current      # 0007 (head)
 .venv\Scripts\python.exe -m uvicorn app.main:app --port 8000 --app-dir api
 ```
 
-- [ ] Postgres up, migrations at `0007 (head)`
-- [ ] uvicorn on :8000 — wait for `Application startup complete.`
+Wait for `Application startup complete.` Both paths want port 8000, so run one or the other.
+</details>
+
+> ⚠️ **Never `docker compose down -v`.** `down` alone stops the containers and keeps the volume;
+> `-v` deletes `payvra_pgdata` and with it the ₹3,18,154 run, the ₹6,00,000 tranche, four real
+> Razorpay links, the delivered email and a 390-entry hash chain. A reseed does not restore them
+> — it builds a *different* book, and this one's money was collected against links that already
+> exist at Razorpay. Verified: a full `down` then `up` cycle leaves all of it intact.
 - [ ] Browser at **http://localhost:8000/ui/**, signed in with
       `c2d79cf5-7f9f-fff3-e0b0-c708a30f6f20`
 - [ ] **Scores populated.** An unscored worklist ranks arbitrarily and the "not an aging report"
@@ -277,7 +299,7 @@ docker compose up -d db
 - [ ] **The email tab is already open**, on the message received 2 Sep, scrolled so the body is
       visible. Opened before recording starts, never during.
 
-### B. 🔴 Before anyone touches a payment link — uvicorn *and* cloudflared, in that order
+### B. 🔴 Before anyone touches a payment link — the API *and* cloudflared, in that order
 
 **The script has nobody clicking a link. If that changes, this section is not optional.** A paid
 link with no webhook receiver is money that moved in the world and did not move in the database,
@@ -287,21 +309,27 @@ were down when the payment went through.
 Sequence matters. The tunnel must point at a server that is already listening:
 
 ```powershell
-# 1. uvicorn first — the tunnel needs something to forward to
-.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000 --app-dir api
+# 1. the API first — the tunnel needs something to forward to
+docker compose up -d --build --wait
 
 # 2. tunnel second, in its own terminal. The URL is new every restart.
 cloudflared tunnel --url http://localhost:8000
 ```
 
-- [ ] uvicorn says `Application startup complete.`
+cloudflared stays on the host: it forwards to the published port 8000, so it does not care
+whether the thing behind it is a container or a host process.
+
+- [ ] `docker compose ps` shows `payvra-api` **healthy** (or uvicorn said `Application startup
+      complete.` on the host path)
 - [ ] cloudflared printed a `https://<something>.trycloudflare.com` URL — **copy it**
 - [ ] That URL is set as the Razorpay webhook endpoint **in the Razorpay dashboard**, at
       `<url>/webhooks/razorpay`. A stale endpoint from a previous tunnel is the failure mode; it
       does not error, the webhook simply never arrives
 - [ ] `PUBLIC_BASE_URL` in `.env` matches the same tunnel — it is currently a **dead** URL
       (`sustainability-shelter-executives-rpg…`). Any message sent while it is stale ships an
-      opt-out link that 404s, which is a compliance claim that does not survive being clicked
+      opt-out link that 404s, which is a compliance claim that does not survive being clicked.
+      **Editing `.env` is not enough on the Docker path** — compose injects the environment when
+      the container starts, so run `docker compose up -d api` afterwards to pick it up
 - [ ] Webhook path confirmed reachable end to end **before** any link is opened, not after
 
 **If you cannot get all four green, do not open a payment link.** Showing a stored, already-paid,

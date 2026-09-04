@@ -29,15 +29,46 @@ PAYVRA closes that loop.
 
 Razorpay AI Buildathon — **Track 3: AI Revenue Recovery**
 
-## Quick start
+## Quick start — Docker
+
+Nothing on the host but Docker. Postgres, the migrations and the API all run in containers.
 
 ```bash
 cp .env.example .env        # fill in Razorpay test keys + one free LLM key
+docker compose up -d --build --wait
+docker compose run --rm api python -m app.seed      # 120 synthetic invoices, first run only
+```
+
+Then <http://localhost:8000/ui/login>. `--wait` blocks until the API answers a real request
+through Postgres, so a successful exit means the whole path is up rather than that a socket is
+listening.
+
+```bash
+docker compose logs -f api                          # follow the server
+docker compose run --rm api python -m scripts.run_batch --report <run-id>
+docker compose down                                 # stop; the data stays
+```
+
+> **Never `docker compose down -v`.** That deletes the `payvra_pgdata` volume, and on a machine
+> holding demo state it destroys recovery runs that cannot be regenerated — a reseed produces a
+> different book, and money already collected was collected against links that exist at Razorpay.
+
+## Quick start — host `.venv`
+
+Still supported, and what the test suite, `ruff` and `mypy` run against.
+
+```bash
+cp .env.example .env
 make install
-make db-up                  # migrations
+make db-up                  # Postgres in Docker + migrations on the host
 make seed                   # 120 synthetic invoices
 make dev                    # API on :8000, web on :5173
 ```
+
+Both paths share one Postgres. `.env` points at `localhost:5433` for the host tools; compose
+overrides `DATABASE_URL` to `db:5432` for the containers, because inside the compose network the
+database is a service name rather than a published host port. Run one or the other — they both
+want port 8000.
 
 You need, at minimum:
 - Razorpay **test mode** key id + secret + webhook secret
