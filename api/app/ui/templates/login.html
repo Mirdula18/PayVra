@@ -1,31 +1,53 @@
 {% extends "base.html" %}
-{% block body %}
+{% block anon %}
 
-<h1>Sign in</h1>
-<p class="lede">
-  Paste a merchant token. <strong>The token is the merchant's UUID</strong> &mdash; a deliberate
-  Phase 1 placeholder with no signing, no expiry and no user table, documented in the README under
-  &ldquo;Known limitations&rdquo;. It is stored in a cookie and resolved against the database on
-  every request, exactly as the API resolves a bearer token.
+<h1 style="font-size:22px;font-weight:700;letter-spacing:-.02em;margin:0 0 4px">Choose a client</h1>
+<p style="color:var(--ink-3);margin:0 0 20px;font-size:13.5px">
+  Each client is a separate book of receivables. Nothing crosses between them.
 </p>
 
-<form method="post" action="/ui/login" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-  <input name="token" placeholder="merchant UUID" style="min-width:340px" required autofocus>
-  <button type="submit">Open</button>
-</form>
-
 {% if candidates %}
-<p class="lede" style="margin-top:26px">Merchants in this database with invoices:</p>
-<div class="scroll">
-<table>
-  <thead><tr><th>Name</th><th>Token</th></tr></thead>
-  <tbody>
-  {% for id, name in candidates %}
-    <tr><td>{{ name }}</td><td class="mono">{{ id }}</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
+<div class="card" style="margin-bottom:18px">
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Client</th><th class="num">Invoices</th><th></th></tr></thead>
+    <tbody>
+    {% for id, name, invoices in candidates %}
+      <tr>
+        <td>
+          <div class="strong">{{ name }}</div>
+          <div class="mono muted" style="font-size:11px">{{ id }}</div>
+        </td>
+        <td class="num">{{ invoices }}</td>
+        <td class="num">
+          <form method="post" action="/ui/login" style="margin:0">
+            <input type="hidden" name="token" value="{{ id }}">
+            <input type="hidden" name="next" value="/ui/home">
+            <button class="btn btn-p btn-sm" type="submit">Open</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
 </div>
+{% else %}
+<div class="card"><div class="empty">
+  <h3>No clients yet</h3>
+  <p>Seed one with <span class="mono">python -m app.seed</span>.</p>
+</div></div>
 {% endif %}
+
+<details class="exp">
+  <summary style="color:var(--ink-3);font-size:13px">Sign in with a token instead</summary>
+  <form method="post" action="/ui/login" class="filters" style="margin-top:10px">
+    <input class="inp" name="token" placeholder="merchant UUID" style="min-width:280px" required>
+    <input type="hidden" name="next" value="/ui/home">
+    <button class="btn btn-p btn-sm" type="submit">Open</button>
+  </form>
+  <p style="color:var(--ink-3);font-size:12.5px;margin:9px 0 0;max-width:60ch">
+    The token is the merchant UUID — a Phase 1 placeholder with no signing or expiry, documented in
+    the README. Picking from the list posts the same value to the same endpoint.
+  </p>
+</details>
 
 {% endblock %}
