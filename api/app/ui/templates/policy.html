@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block topbar %}
+<span class="b b-ok"><span class="dot"></span>{{ checks|length }} checks enforced</span>
+<span class="b b-mute">no bypass path</span>
+{% endblock %}
+
+{% block body %}
+
+{% set rules = [
+  ('time_window', 'Contact hours', 'Refuse all outbound outside 08:00–19:00 IST', 'RBI recovery-conduct norms', 'stop'),
+  ('freshness', 'Freshness', 'Refuse if the invoice settled between planning and dispatch', 'Never chase money already paid', 'stop'),
+  ('consent', 'Consent', 'Refuse without consent on file, or after opt-out', 'Every message carries an opt-out link', 'stop'),
+  ('frequency_cap', 'Frequency cap', 'Refuse if this counterparty was contacted too recently', 'Counts confirmed deliveries only', 'warn'),
+  ('value_threshold', 'Value ceiling', 'Refuse above the amount an agent may act on alone', 'Routes to Needs review', 'warn'),
+  ('content_policy', 'Content policy', 'Refuse a draft missing its opt-out, tier or required fields', 'Validated before dispatch', 'warn'),
+  ('stopping_rules', 'Stopping rules', 'Refuse if disputed, excluded, or out of touch budget', 'Ends outreach permanently', 'stop'),
+] %}
+
+<div class="card" style="margin-bottom:14px">
+  <div class="card-h">
+    <h2>Escalation ladder</h2>
+    <span class="muted t-sm">The agent may soften on its own. It must ask permission to harden.</span>
+  </div>
+  <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+    <div>
+      <div class="kpi lab">Attempt 1</div>
+      <div style="margin-top:6px"><span class="b b-mute">Tier 1 · Polite</span></div>
+      <div class="muted t-sm" style="margin-top:6px">Agent acts alone</div>
+    </div>
+    <div>
+      <div class="kpi lab">Attempt 2</div>
+      <div style="margin-top:6px"><span class="b b-warn">Tier 2 · Firm</span></div>
+      <div class="muted t-sm" style="margin-top:6px">Agent acts alone</div>
+    </div>
+    <div>
+      <div class="kpi lab">Attempt 3</div>
+      <div style="margin-top:6px"><span class="b b-stop">Tier 3 · Final</span></div>
+      <div class="muted t-sm" style="margin-top:6px"><strong style="color:var(--stop)">Human approval required</strong></div>
+    </div>
+    <div>
+      <div class="kpi lab">De-escalation</div>
+      <div style="margin-top:6px"><span class="b b-ok">Automatic</span></div>
+      <div class="muted t-sm" style="margin-top:6px">A partial payment softens the next message</div>
+    </div>
+  </div>
+</div>
+
+<div class="grid g3">
+  {% for key, name, rule, note, tone in rules %}
+    <div class="card">
+      <div class="card-h">
+        <h2>{{ name }}</h2>
+        <span class="b b-{{ 'stop' if fired.get(key) else 'mute' }}" style="margin-left:auto"
+              data-tip="Times this check has refused an action on this book">
+          {{ fired.get(key, 0) }} stopped
+        </span>
+      </div>
+      <div class="card-b">
+        <div class="strong t-sm" style="margin-bottom:6px">{{ rule }}</div>
+        <div class="muted t-sm">{{ note }}</div>
+      </div>
+    </div>
+  {% endfor %}
+</div>
+
+<div class="card" style="margin-top:14px">
+  <div class="card-h"><h2>Enforcement</h2></div>
+  <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px">
+    <div>
+      <div class="kpi lab">Order</div>
+      <div class="t-sm" style="margin-top:5px">Fixed, and every check runs — no short-circuit, no “warn and continue”.</div>
+    </div>
+    <div>
+      <div class="kpi lab">Bypass</div>
+      <div style="margin-top:5px"><span class="b b-ok">None</span></div>
+      <div class="muted t-sm" style="margin-top:5px">No flag, no parameter, no admin toggle.</div>
+    </div>
+    <div>
+      <div class="kpi lab">Contact window override</div>
+      <div style="margin-top:5px">
+        {% if settings.contact_window_override_start is not none %}
+          <span class="b b-warn">Active · {{ '%02d'|format(settings.contact_window_override_start) }}:00–{{ '%02d'|format(settings.contact_window_override_end) }}:00</span>
+        {% else %}
+          <span class="b b-mute">Not set</span>
+        {% endif %}
+      </div>
+      <div class="muted t-sm" style="margin-top:5px">Environment variable only. The check still runs, and the override is written to the audit log.</div>
+    </div>
+    <div>
+      <div class="kpi lab">Record</div>
+      <div style="margin-top:5px"><span class="b b-ok">Hash-chained, append-only</span></div>
+      <div class="muted t-sm" style="margin-top:5px">Every verdict recorded, pass or fail.</div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

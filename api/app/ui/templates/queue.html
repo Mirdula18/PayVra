@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block body %}
+
+<div class="grid g6" style="margin-bottom:14px">
+  {% for key, label, states, tone in buckets %}
+    {% set n, amt = counts.get(key, (0, 0)) %}
+    <a class="card kpi {{ 'on' if selected == key }}" href="/ui/queue?bucket={{ key }}"
+       style="{{ 'border-color:var(--brand);box-shadow:0 0 0 1px var(--brand)' if selected == key }}">
+      <div class="lab">
+        <span class="b b-{{ tone }}" style="padding:0 4px"><span class="dot"></span></span>
+        {{ label }}
+      </div>
+      <div class="val sm">{{ n }}</div>
+      <div class="meta">{{ amt | rupees }}</div>
+    </a>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <div class="card-h">
+    <h2>{{ buckets | selectattr('0', 'equalto', selected) | map(attribute='1') | first }}</h2>
+    <span class="b b-mute">{{ rows|length }} shown</span>
+    {% if selected == 'review' %}
+      <span class="muted t-sm" data-tip="The gate refused to act without a person: above the value ceiling, or at the firmest tone tier.">Waiting on a human ⓘ</span>
+    {% elif selected == 'stopped' %}
+      <span class="muted t-sm" data-tip="A stopping rule ended outreach: disputed, opted out, on the exception list, or out of touch budget.">Outreach ended by rule ⓘ</span>
+    {% endif %}
+  </div>
+
+  {% if not rows %}
+    <div class="empty">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 6L9 17l-5-5"/></svg></div>
+      <h3>Nothing here</h3>
+      <p>No accounts are in this state right now.</p>
+    </div>
+  {% else %}
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Customer</th><th>Invoice</th><th class="num">Amount</th>
+          <th class="num">Overdue</th><th>Root cause</th><th class="num">Attempts</th>
+          <th>Tier</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for invoice, cp in rows %}
+        <tr>
+          <td class="strong">{{ cp.name }}</td>
+          <td><a class="mono" href="/ui/invoice/{{ invoice.id }}" style="color:var(--brand);font-weight:600">{{ invoice.invoice_number }}</a></td>
+          <td class="num strong">{{ invoice.outstanding_paise | rupees }}</td>
+          <td class="num">{{ invoice.days_past_due }}d</td>
+          <td class="t-sm">{{ cause_labels.get(invoice.inferred_cause, invoice.inferred_cause) }}</td>
+          <td class="num">{{ invoice.touch_count }}</td>
+          <td><span class="b b-{{ 'stop' if invoice.current_tone_tier == 3 else 'warn' if invoice.current_tone_tier == 2 else 'mute' }}">T{{ invoice.current_tone_tier }}</span></td>
+          <td class="num"><a class="btn btn-sm" href="/ui/invoice/{{ invoice.id }}">Review</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+{% endblock %}

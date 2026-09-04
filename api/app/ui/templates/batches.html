@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block topbar %}
+<form method="post" action="/ui/run" class="filters" style="gap:8px">
+  <input class="inp" type="number" name="limit" value="5" min="1" max="25" style="width:64px">
+  <label class="btn btn-sm"><input type="checkbox" name="live" value="1" style="margin-right:5px">Send for real</label>
+  <button class="btn btn-p btn-sm" type="submit">Run recovery</button>
+</form>
+{% endblock %}
+
+{% block body %}
+
+{% if not rows %}
+  <div class="card"><div class="empty">
+    <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7l9-4 9 4-9 4-9-4zM3 12l9 4 9-4"/></svg></div>
+    <h3>No batches yet</h3>
+    <p>Run one from the button above. Leave <strong>Send for real</strong> unticked and nothing is contacted.</p>
+  </div></div>
+{% else %}
+
+{% for r, f in rows %}
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-h">
+      <h2>{{ r.started_at | ist('%d %b %Y, %H:%M') }} IST</h2>
+      {% if r.dry_run %}<span class="b b-mute" data-tip="Full pipeline, full audit trail, nobody contacted">Rehearsal</span>
+      {% else %}<span class="b b-ok"><span class="dot"></span>Live</span>{% endif %}
+      {% if r.window_overridden %}
+        <span class="b b-warn" data-tip="Contact window widened to {{ '%02d'|format(r.contact_hour_start) }}:00–{{ '%02d'|format(r.contact_hour_end) }}:00 IST; the override is recorded in the audit log">Window widened</span>
+      {% endif %}
+      <span class="mono muted" style="font-size:11px">{{ r.id }}</span>
+      <a class="act" href="/ui/audit?run={{ r.id }}">Verdicts →</a>
+    </div>
+
+    <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:16px">
+      <div>
+        <div class="kpi lab">Recovered</div>
+        <div class="val" style="font-size:22px;font-weight:700;color:{{ 'var(--ok)' if f.causal.rupees_paise else 'var(--ink-3)' }}">
+          {{ f.causal.rupees_paise | rupees }}
+        </div>
+        <div class="muted t-sm" style="margin-top:3px">
+          {{ f.causal.invoices_paid_in_full }} full · {{ f.causal.invoices_partially_recovered }} partial
+        </div>
+      </div>
+      <div>
+        <div class="kpi lab">Accounts</div>
+        <div class="val" style="font-size:22px;font-weight:700">{{ f.accounts_considered }}</div>
+        <div class="muted t-sm" style="margin-top:3px">considered</div>
+      </div>
+      <div>
+        <div class="kpi lab">Executed</div>
+        <div class="val" style="font-size:22px;font-weight:700">{{ f.actions_executed }}</div>
+        <div class="muted t-sm" style="margin-top:3px">{{ f.actions_approved }} approved, not sent</div>
+      </div>
+      <div>
+        <div class="kpi lab">Refused</div>
+        <div class="val" style="font-size:22px;font-weight:700;color:{{ 'var(--stop)' if f.actions_refused else 'inherit' }}">{{ f.actions_refused }}</div>
+        <div class="muted t-sm" style="margin-top:3px">stopped by a rule</div>
+      </div>
+      <div>
+        <div class="kpi lab">Window</div>
+        <div class="val" style="font-size:16px;font-weight:650;padding-top:5px">
+          {{ '%02d'|format(r.contact_hour_start) }}:00–{{ '%02d'|format(r.contact_hour_end) }}:00
+        </div>
+        <div class="muted t-sm" style="margin-top:3px">IST</div>
+      </div>
+    </div>
+
+    {% set acted = f.actions_executed + f.actions_approved %}
+    {% set total = acted + f.actions_refused %}
+    {% if total %}
+    <div class="card-b" style="border-top:1px solid var(--line-2);padding-top:13px">
+      <div class="stack" style="margin-bottom:9px">
+        <i style="width:{{ f.actions_executed / total * 100 }}%;background:var(--ok)"></i>
+        <i style="width:{{ f.actions_approved / total * 100 }}%;background:var(--warn)"></i>
+        <i style="width:{{ f.actions_refused / total * 100 }}%;background:var(--stop)"></i>
+      </div>
+      <div class="legend">
+        <b><i style="background:var(--ok)"></i>Sent {{ f.actions_executed }}</b>
+        <b><i style="background:var(--warn)"></i>Approved, not sent {{ f.actions_approved }}</b>
+        <b><i style="background:var(--stop)"></i>Refused {{ f.actions_refused }}</b>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+{% endfor %}
+
+<p class="muted t-sm">
+  Recovery is attributed per batch and has no closing time, so two batches that chased the same
+  invoice both report what it later paid. <strong>The column does not sum.</strong>
+</p>
+{% endif %}
+
+{% endblock %}

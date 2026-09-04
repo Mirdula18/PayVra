@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+
+{% block topbar %}
+<form method="post" action="/ui/run" class="filters" style="gap:8px">
+  <input class="inp" type="number" name="limit" value="5" min="1" max="25" style="width:64px"
+         data-tip="Accounts this run may touch">
+  <label class="btn btn-sm" data-tip="Off = rehearsal. Nothing is sent, the full audit trail is still written.">
+    <input type="checkbox" name="live" value="1" style="margin-right:5px">Send for real
+  </label>
+  <button class="btn btn-p btn-sm" type="submit">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3l14 9-14 9V3z"/></svg>
+    Run recovery
+  </button>
+</form>
+{% endblock %}
+
+{% block body %}
+
+<div class="grid g6" style="margin-bottom:14px">
+  <div class="card kpi">
+    <div class="lab">Revenue at risk</div>
+    <div class="val">{{ at_risk_amount | rupees }}</div>
+    <div class="meta">{{ at_risk_rows }} invoices · {{ customers }} customers</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Recovered</div>
+    <div class="val" style="color:var(--ok)">{{ recovered | rupees }}</div>
+    <div class="meta">reconciled by signed webhook</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Recovery rate</div>
+    <div class="val">{{ '%.1f'|format(rate) }}%</div>
+    <div class="meta">of addressable value</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Active recoveries</div>
+    <div class="val">{{ active }}</div>
+    <div class="meta">agent working now</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Needs review</div>
+    <div class="val" style="color:{{ 'var(--warn)' if nav_review else 'inherit' }}">{{ nav_review }}</div>
+    <div class="meta">{% if nav_review %}<a href="/ui/queue?bucket=review" style="color:var(--brand);font-weight:600">Open queue →</a>{% else %}nothing waiting{% endif %}</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Refused by gate</div>
+    <div class="val">{{ counts.get('blocked', 0) }}</div>
+    <div class="meta">{{ rules_fired|length }} of {{ gate_check_total }} rules fired</div>
+  </div>
+</div>
+
+<div class="grid g21" style="margin-bottom:14px">
+
+  <div class="card">
+    <div class="card-h">
+      <h2>Why revenue is stuck</h2>
+      <a class="act" href="/ui/worklist">All at-risk →</a>
+    </div>
+    <div class="card-b" style="padding-top:14px">
+      {% for b in breakdown %}
+        <a href="/ui/worklist?cause={{ b.cause }}" style="display:block;margin-bottom:{{ '0' if loop.last else '14px' }}">
+          <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px">
+            <span class="strong t-sm">{{ b.label }}</span>
+            <span class="muted t-sm">{{ b.count }}</span>
+            <span class="num strong" style="margin-left:auto">{{ b.amount | rupees }}</span>
+            <span class="muted t-sm" style="width:42px;text-align:right">{{ '%.0f'|format(b.pct) }}%</span>
+          </div>
+          <div class="bar"><i style="width:{{ '%.1f'|format(b.pct) }}%;background:{{ ['#0f6b62','#b45309','#175cd3','#b42318','#8a94a6'][loop.index0 % 5] }}"></i></div>
+        </a>
+      {% else %}
+        <div class="empty"><h3>Nothing at risk</h3><p>Every invoice on this book is settled.</p></div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h">
+      <h2>Guardrails</h2>
+      <a class="act" href="/ui/policy">Policy →</a>
+    </div>
+    <div class="card-b">
+      <div class="kpi lab" style="margin-bottom:8px">Stopped before sending</div>
+      {% for rule in rules_fired %}
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
+          <span class="b b-stop">{{ rule.replace('_', ' ') }}</span>
+        </div>
+      {% else %}
+        <p class="muted t-sm" style="margin:0">Nothing refused yet.</p>
+      {% endfor %}
+      <div style="border-top:1px solid var(--line-2);margin-top:12px;padding-top:12px">
+        <dl class="kv">
+          <dt>Contact window</dt><dd>08:00–19:00 IST</dd>
+          <dt>Checks per action</dt><dd>{{ gate_check_total }}</dd>
+          <dt>Audit entries</dt><dd>{{ audit_total }}</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="grid g21">
+
+  <div class="card">
+    <div class="card-h">
+      <h2>Batches</h2>
+      <span class="b b-mute">{{ run_figures|length }} run{{ '' if run_figures|length == 1 else 's' }}</span>
+      <a class="act" href="/ui/batches">All batches →</a>
+    </div>
+    {% if not run_figures %}
+      <div class="empty">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7l9-4 9 4-9 4-9-4zM3 12l9 4 9-4"/></svg></div>
+        <h3>No batches yet</h3>
+        <p>{% if dry_runs_hidden %}{{ dry_runs_hidden }} rehearsal{{ '' if dry_runs_hidden == 1 else 's' }} ran and contacted nobody. {% endif %}Use <strong>Run recovery</strong> above.</p>
+      </div>
+    {% else %}
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Batch</th><th class="num">Accounts</th><th class="num">Sent</th><th class="num">Refused</th><th class="num">Recovered</th><th></th></tr>
+        </thead>
+        <tbody>
+        {% for r, f in run_figures %}
+          <tr>
+            <td class="t-sm">{{ r.started_at | ist('%d %b, %H:%M') }}
+              {% if r.window_overridden %}<span class="b b-warn" data-tip="Contact window widened; the override is in the audit log">widened</span>{% endif %}
+            </td>
+            <td class="num">{{ f.accounts_considered }}</td>
+            <td class="num">{{ f.actions_executed }}</td>
+            <td class="num">{{ f.actions_refused }}</td>
+            <td class="num strong">{% if f.causal.rupees_paise %}{{ f.causal.rupees_paise | rupees }}{% else %}<span class="muted">—</span>{% endif %}</td>
+            <td class="num"><a class="btn btn-sm" href="/ui/recovery?run={{ r.id }}">View</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card-b" style="border-top:1px solid var(--line-2);padding:10px 16px">
+      <span class="muted t-sm" data-tip="Causal recovery has no closing time, so two batches that chased the same invoice both report what it later paid.">
+        Per-batch attribution — these do not sum ⓘ
+      </span>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-h">
+      <h2>Agent activity</h2>
+      <a class="act" href="/ui/audit">Audit log →</a>
+    </div>
+    <div class="feed">
+      {% for e in feed %}
+        {% set failed = e.gate_verdicts | selectattr('passed', 'equalto', false) | list %}
+        <div class="row">
+          <div class="ic {{ 'b-stop' if e.outcome in ('blocked','refused') else 'b-ok' if e.outcome == 'executed' else 'b-warn' if e.outcome == 'approved' else 'b-mute' }}">
+            {% if e.outcome in ('blocked','refused') %}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            {% elif e.outcome == 'executed' %}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6L9 17l-5-5"/></svg>
+            {% else %}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            {% endif %}
+          </div>
+          <div class="txt">
+            <div class="h">{{ e.action_type.split('.')[-1].replace('_',' ') | capitalize }}</div>
+            <div class="s">
+              {% if failed %}Stopped — {{ failed[0].check.replace('_',' ') }}
+              {% else %}{{ e.rationale[:64] }}{% if e.rationale|length > 64 %}…{% endif %}{% endif %}
+            </div>
+          </div>
+          <div class="amt">
+            <div class="a"><span class="b b-{{ 'stop' if e.outcome in ('blocked','refused') else 'ok' if e.outcome == 'executed' else 'warn' if e.outcome == 'approved' else 'mute' }}">{{ e.outcome }}</span></div>
+            <div class="t">{{ e.created_at | ist('%d %b %H:%M') }}</div>
+          </div>
+        </div>
+      {% else %}
+        <div class="empty"><h3>No activity</h3><p>Run a batch to see the agent work.</p></div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{% endblock %}

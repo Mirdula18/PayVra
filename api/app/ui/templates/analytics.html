@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block body %}
+
+<div class="grid g6" style="margin-bottom:14px">
+  <div class="card kpi">
+    <div class="lab">Total recovered</div>
+    <div class="val" style="color:var(--ok)">{{ recovered | rupees }}</div>
+    <div class="meta">{{ settlements|length }} settlements</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Recovery rate</div>
+    <div class="val">{{ '%.1f'|format(rate) }}%</div>
+    <div class="meta">of addressable value</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Still at risk</div>
+    <div class="val">{{ at_risk_amount | rupees }}</div>
+    <div class="meta">{{ at_risk_rows }} invoices</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Batches run</div>
+    <div class="val">{{ runs_real }}</div>
+    <div class="meta">{{ runs_total - runs_real }} rehearsals</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Actions sent</div>
+    <div class="val">{{ batch_executed }}</div>
+    <div class="meta">across {{ batch_accounts }} account passes</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Refusal rate</div>
+    {% set attempted = batch_executed + batch_refused %}
+    <div class="val">{{ '%.0f'|format(batch_refused / attempted * 100 if attempted else 0) }}%</div>
+    <div class="meta">{{ batch_refused }} stopped by a rule</div>
+  </div>
+</div>
+
+<div class="grid g2" style="margin-bottom:14px">
+
+  <div class="card">
+    <div class="card-h"><h2>Money recovered, cumulative</h2></div>
+    <div class="card-b">
+      {% if settlements %}
+        {% set running = namespace(t=0) %}
+        {% set pts = [] %}
+        {% for created, amount in settlements %}
+          {% set running.t = running.t + (amount or 0) %}
+          {% if pts.append({'t': running.t, 'at': created}) %}{% endif %}
+        {% endfor %}
+        {% set peak = pts[-1].t or 1 %}
+        <svg viewBox="0 0 600 150" preserveAspectRatio="none" style="width:100%;height:150px">
+          <polyline fill="none" stroke="var(--brand)" stroke-width="2.5" stroke-linejoin="round"
+            points="{% for p in pts %}{{ loop.index0 / ([pts|length - 1, 1] | max) * 600 }},{{ 145 - (p.t / peak * 130) }} {% endfor %}"/>
+          <polygon fill="var(--brand-2)" opacity=".7"
+            points="0,145 {% for p in pts %}{{ loop.index0 / ([pts|length - 1, 1] | max) * 600 }},{{ 145 - (p.t / peak * 130) }} {% endfor %} 600,145"/>
+        </svg>
+        <div style="display:flex;justify-content:space-between;margin-top:8px">
+          <span class="muted t-sm">{{ settlements[0][0] | ist('%d %b %Y') }}</span>
+          <span class="strong">{{ recovered | rupees }}</span>
+          <span class="muted t-sm">{{ settlements[-1][0] | ist('%d %b %Y') }}</span>
+        </div>
+      {% else %}
+        <div class="empty"><h3>Nothing recovered yet</h3><p>Settlements appear here as webhooks reconcile.</p></div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h">
+      <h2>What the gate refused</h2>
+      <a class="act" href="/ui/policy">Rules →</a>
+    </div>
+    <div class="card-b">
+      {% for check, n in refusals %}
+        <div style="margin-bottom:{{ '0' if loop.last else '13px' }}">
+          <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px">
+            <span class="strong t-sm">{{ check.replace('_',' ') | capitalize }}</span>
+            <span class="num strong" style="margin-left:auto">{{ n }}</span>
+          </div>
+          <div class="bar"><i style="width:{{ n / refusals_max * 100 }}%;background:var(--stop)"></i></div>
+        </div>
+      {% else %}
+        <div class="empty"><h3>Nothing refused</h3><p>No action has been stopped by a rule on this book.</p></div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<div class="grid g2">
+  <div class="card">
+    <div class="card-h"><h2>At risk by root cause</h2></div>
+    <div class="card-b">
+      <div class="stack" style="height:12px;margin-bottom:12px">
+        {% for b in breakdown %}
+          <i style="width:{{ b.pct }}%;background:{{ ['#0f6b62','#b45309','#175cd3','#b42318','#8a94a6'][loop.index0 % 5] }}"
+             data-tip="{{ b.label }} · {{ b.amount | rupees }}"></i>
+        {% endfor %}
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Cause</th><th class="num">Invoices</th><th class="num">Value</th><th class="num">Share</th></tr></thead>
+          <tbody>
+          {% for b in breakdown %}
+            <tr>
+              <td><span class="b b-mute" style="background:{{ ['#0f6b62','#b45309','#175cd3','#b42318','#8a94a6'][loop.index0 % 5] }};color:#fff">{{ b.label }}</span></td>
+              <td class="num">{{ b.count }}</td>
+              <td class="num strong">{{ b.amount | rupees }}</td>
+              <td class="num muted">{{ '%.0f'|format(b.pct) }}%</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h2>Action outcomes</h2><a class="act" href="/ui/audit">Audit log →</a></div>
+    <div class="card-b">
+      {% set order = [('executed','Sent','ok'),('approved','Approved','warn'),('blocked','Refused by gate','stop'),('refused','Refused in run','stop'),('applied','Applied','mute'),('stopped','Stopped','mute')] %}
+      {% set omax = counts.values() | max if counts else 1 %}
+      {% for key, label, tone in order %}
+        {% if counts.get(key) %}
+        <div style="margin-bottom:13px">
+          <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px">
+            <span class="b b-{{ tone }}">{{ label }}</span>
+            <span class="num strong" style="margin-left:auto">{{ counts.get(key) }}</span>
+          </div>
+          <div class="bar"><i style="width:{{ counts.get(key) / omax * 100 }}%;background:var(--{{ 'ok' if tone=='ok' else 'warn' if tone=='warn' else 'stop' if tone=='stop' else 'ink-3' }})"></i></div>
+        </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{% endblock %}
