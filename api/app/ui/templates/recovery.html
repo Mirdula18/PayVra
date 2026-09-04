@@ -62,10 +62,13 @@
   Time-window counts money that arrived during the run for any reason; causal counts only invoices
   the run actually acted on and the gate approved.
   <p style="margin:10px 0 0">
-    The gap usually includes invoices where <strong>the gate refused to make contact and the
-    counterparty paid anyway</strong>. That money is not claimed here. The headline is smaller
-    because it is the one that can be stood behind &mdash; the same argument the audit log makes,
-    expressed as a number.
+    Neither figure bounds the other. Time-window runs ahead when money arrives mid-run for reasons
+    that have nothing to do with the run &mdash; including invoices where <strong>the gate refused
+    to make contact and the counterparty paid anyway</strong>, which is money this screen never
+    claims. Causal runs ahead when a run finishes in seconds and the payments it caused land hours
+    later, which leaves time-window counting almost nothing. Causal is the headline either way,
+    because it is the only one of the two that can name the invoices it counted &mdash; the same
+    argument the audit log makes, expressed as a number.
   </p>
 </div>
 {% else %}

@@ -46,12 +46,18 @@ happened; the demo reads what they produced.
 | The two live runs | **Pre-computed** | Already in the database. At ~30 RPM a 20-account run takes minutes |
 | Payment links | **Pre-computed** | Real, already created and already paid |
 | Webhooks / settlement | **Pre-computed** | Already received, verified and reconciled |
+| **The delivered email** | **Pre-computed** | Sent 2 Sep, already sitting in the inbox. Opened from a tab, never triggered on stage |
 | All three screens | **Live** | Server-rendered reads of local Postgres — no API in the path |
 | `--report` in a terminal | **Live, optional** | One local query. Safe |
-| A fresh batch run | **NEVER on stage** | Model latency, Razorpay rate limits, link budget |
+| A fresh batch run | **NEVER on stage** | Model latency, Razorpay rate limits, link budget — **and it now sends real email** |
 
-The only live things are page loads against your own database. There is no call to Razorpay, Groq
-or Gemini anywhere in the five minutes.
+The only live things are page loads against your own database. There is no call to Razorpay, Groq,
+Gemini or Resend anywhere in the five minutes.
+
+**Sending live is the one addition that would break this property, and it is not worth it.** An
+inbox refresh is somewhere between two seconds and a minute, none of which you control, and dead
+air on a five-minute video is unrecoverable. The stored send is better evidence anyway: it has a
+provider message ID in the log, which a live send would not have until it landed.
 
 **If a judge asks whether the batch was pre-computed, say yes** — it is how any system with rate
 limits behaves, the batch genuinely ran, it ran earlier. Honesty costs nothing here and being
@@ -75,8 +81,8 @@ Do not say "AI-powered". Do not open the architecture.
 
 Point at the ordering, then at one reason string.
 
-> "₹2.01 crore across 120 invoices. This is not an aging report — it's ranked by **recoverable
-> money**: probability of collection, times amount, times urgency.
+> "₹2.01 crore of open receivables, worst first. This is not an aging report — it's ranked by
+> **recoverable money**: probability of collection, times amount, times urgency.
 >
 > Look at row four. Meridian Logistics, ₹8.3 lakh, **ten days late**.
 >
@@ -91,8 +97,14 @@ Point at the ordering, then at one reason string.
 > ⚠️ **Re-read these three rows before recording.** The total and the ordering shift as payments
 > land — the ₹2.07 crore in an earlier draft of this script was already stale by ₹6 lakh after the
 > tranche run. Numbers spoken aloud have to be checked the morning of, not inherited.
+>
+> **Do not say "across 120 invoices".** The chip on screen totals the **40 rows displayed**, not
+> the book. There are 120 invoices and 115 still owing, and the whole book is ₹3.06 crore — a
+> figure that appears nowhere on screen. Verified 2 Sep: the chip reads **₹2,01,48,694**, and rows
+> four, seven and eleven are still Meridian (₹8.3L, 10 days), Blue Ocean (128 days) and Zenith
+> (₹14L, 86 days).
 
-## 1:30–2:30 — Screen 3: Audit log → *clauses 3 and 4*
+## 1:30–2:20 — Screen 3: Audit log → *clauses 3 and 4*
 
 **Stay on the default "All runs" view. Do not filter to a run here.**
 
@@ -106,7 +118,7 @@ This is the centre of the demo; give it the time.
 
 > "This is the agent's decision log. Every action it proposed, and what happened to it.
 >
-> **Thirty-four refused by the gate. Fifty-six refused inside a run.** Thirty-seven executed. And
+> **Fifty-nine refused by the gate. Ninety-six refused inside a run.** Forty-four executed. And
 > they're all in the same list, not a separate tab, because the refusals are the point."
 
 Click **Refused by gate**, then read three aloud, unhurried, pointing at the red pills:
@@ -119,15 +131,18 @@ Click **Refused by gate**, then read three aloud, unhurried, pointing at the red
 
 > ⚠️ **Two things to know before you point at a row.**
 >
-> **The chip counts drift.** Re-read them the morning of; do not recite the numbers above from
-> memory.
+> **The chip counts drift, and they have.** They were 34 / 56 / 37 when this script was first
+> written and are 59 / 96 / 44 now, because the Phase 6.5 delivery runs on 2 Sep added their own
+> refusals. Re-read the chips the morning of; do not recite any number from memory, including the
+> ones above.
 >
-> **Stay on the 29 Aug rows.** Those 30 entries are from real runs. Scroll far enough and you reach
-> four seeded historical entries (31 Jul, 13 Aug, 20 Aug) illustrating `freshness`,
-> `frequency_cap`, `time_window` and `stopping_rules` — a realistic book has history, and the seed
-> builds it. They are legitimate demo data, **but they did not happen on a live run**, so never
-> point at one and imply it did. If a judge asks about a July date, say plainly it is seeded
-> history and scroll back to 29 Aug.
+> **Stay on the 29 Aug and 2 Sep rows.** Of the 59 gate refusals, 30 are from the 29 Aug runs and
+> 25 from the 2 Sep delivery runs — all real. Scroll far enough and you reach **four** seeded
+> historical entries (31 Jul ×2, 13 Aug, 20 Aug) illustrating `freshness`, `frequency_cap`,
+> `time_window` and `stopping_rules` — a realistic book has history, and the seed builds it. They
+> are legitimate demo data, **but they did not happen on a live run**, so never point at one and
+> imply it did. If a judge asks about a July date, say plainly it is seeded history and scroll
+> forward.
 
 Then the chain column:
 
@@ -139,26 +154,68 @@ Hover a chain cell to show the full hash pair.
 > "Any tool can show you what it did. This shows what it **refused to do**, and the rule that
 > stopped it."
 
-## 2:30–3:30 — Screen 2: Recovery → *clause 1*
+## 2:20–2:40 — The email that actually went out → *clause 4*
 
-Same run selected.
+**Alt-tab to a tab that already has the email open.** Do not send anything. Do not open an inbox
+and refresh. Do not wait for anything to arrive. The tab is loaded before recording starts, and the
+whole beat is twenty seconds.
+
+This exists because `executed` is a claim, and until Phase 6.5 it was a claim the log could not
+back. Now it can.
+
+> "One thing about that `executed` pill — it doesn't mean drafted, and it doesn't mean queued.
+>
+> This is the message. A real send through a real provider, with the provider's message ID written
+> back into the log next to the action. Tier two, because this is the second attempt on this
+> invoice. The link in it is a live Razorpay payment link.
+>
+> And there's an opt-out at the bottom of every one of these, because a collections message you
+> can't unsubscribe from isn't compliant, whatever it says in the body."
+
+Let them read it. Do not recite the message aloud — twenty seconds of a judge reading a real email
+is worth more than you narrating it.
+
+> ⚠️ **Two things about this screen that you volunteer rather than get caught on.**
+>
+> **The `To:` is your own address, not the counterparty's.** Every outbound email is redirected to
+> one address by configuration — that is deliberate, the seeded book is realistic-looking addresses
+> on a reserved domain, and sending collections mail to them would be indefensible. If the `To:`
+> line is visible on screen, say so in one sentence: *"every send is redirected to a single test
+> inbox — the counterparty addresses in the seed are fake, and I'm not emailing strangers to
+> rehearse a demo."* It reads as care. Being asked about it first reads as a bug.
+>
+> **Do not click the opt-out link.** It points at a cloudflared quick tunnel that no longer exists,
+> because the URL is baked into the body at send time and quick tunnels get a new address on every
+> restart. The link being present is the compliance claim; the tunnel being live is not part of the
+> demo. See the checklist in `runbooks/demo-rehearsal.md`.
+
+## 2:40–3:30 — Screen 2: Recovery → *clause 1*
+
+Same run selected. **The second figure on this screen reads ₹0. Explain it before anyone asks.**
 
 > "₹3,18,154 recovered. Real money, on a real Razorpay link, paid by a real payment, reconciled by
 > a signed webhook.
 >
-> Two figures, though. **Causal** — the headline — counts only invoices this run acted on.
-> **Time-window** counts everything that arrived while the run was open.
+> There are two figures here, and the second one is zero. That's not a gap in the data — it's the
+> reason we lead with the first.
 >
-> We lead with the smaller one."
+> **Time-window** counts everything that arrived while the run was open. This run was open for five
+> seconds. Nobody pays an invoice in five seconds, so it counts nothing.
+>
+> **Causal** counts money received against the invoices this run actually acted on, with no closing
+> time — because recovery isn't instant. A counterparty pays hours or days later. That's the
+> ₹3,18,154."
 
-Then the divergence note. **This is the moment that separates the pitch.**
+Then the point. **This is the moment that separates the pitch.**
 
-> "The gap is mostly invoices where the gate refused to let us make contact — frequency cap,
-> outside contact hours, no consent on file. Some of those customers paid anyway.
+> "Which is the thing about a time-window number: it's mostly a measure of how long your batch ran.
+> Leave it going overnight and it gets enormous, and none of that extra money is yours.
 >
-> We could count that money. We don't, because we didn't earn it.
+> So we don't lead with it. We lead with the one that can name the invoices — and even that one
+> leaves money out. There are accounts in this run where the gate refused to let us make contact,
+> and the customer paid anyway. We could count that. We don't, because we didn't earn it.
 >
-> The number is smaller because it's the one we can stand behind."
+> It's the smaller claim. It's the one that survives the question."
 
 ## 3:30–4:20 — Escalation and the ₹14 lakh answer → *clause 2*
 
@@ -183,7 +240,8 @@ Back to the Audit log, refusals filter still on.
 
 > "So: it ranks by recoverable money, diagnoses why each invoice is unpaid, proposes one action per
 > account from a closed list — and a deterministic gate decides whether it runs. Seven checks,
-> every one recorded, pass or fail.
+> every one recorded, pass or fail. What passes gets sent, and what gets sent is what the log calls
+> executed. Nothing else earns that word.
 >
 > Measured money recovered. Compliant escalation. Stopping rules. An audit trail.
 >
@@ -200,9 +258,15 @@ Leave the refusal list on screen. Stop talking.
 |---|---|---|
 | 1 | Worklist | 1 (context) — recoverable money, not age |
 | 2 | **Audit log** | **3 and 4** — refusals beside sends, hash chain |
-| 3 | Recovery | 1 — causal headline, divergence explained |
-| 4 | Audit log, refusals filter | 2 — the tier ladder and its approval ceiling |
-| 5 | Recovery, tranche run | 1 — the ₹14 lakh answer |
+| 3 | **The delivered email** | **4** — `executed` means a message left the building |
+| 4 | Recovery | 1 — causal headline, the ₹0 explained |
+| 5 | Audit log, refusals filter | 2 — the tier ladder and its approval ceiling |
+| 6 | Recovery, tranche run | 1 — the ₹14 lakh answer |
+
+The email sits **immediately after** the audit log and before the money, because it closes the
+audit log's own loop: a judge who has just read a column of `executed` pills is holding exactly the
+question the email answers, and answering it there costs twenty seconds. Moved later it becomes a
+feature tour; moved earlier it is a screenshot with nothing to prove.
 
 **The audit log is second, not last.** It is the strongest screen and the one a judge is least
 likely to have seen from another team. Leading with the number invites arithmetic; leading with the
@@ -218,5 +282,7 @@ Judges should reach the end having *seen* all four clauses without hearing you a
 - Saying "AI-powered" before showing a refusal
 - Running a live batch on stage
 - Claiming a clause instead of showing it
-- Being unable to explain why the two recovery numbers differ
+- **Not explaining the ₹0 before a judge notices it**
+- **Triggering a send on stage and watching an inbox** — the one avoidable source of dead air
+- **Being asked about the `To:` address instead of volunteering it**
 - Hiding that the batch was pre-computed
