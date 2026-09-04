@@ -1,113 +1,95 @@
 {% extends "base.html" %}
+
+{% block topbar %}
+<form method="get" class="filters">
+  <select class="inp" name="run" onchange="this.form.submit()">
+    {% for r in runs %}
+      {% set f = figures_by_run.get(r.id) %}
+      <option value="{{ r.id }}" {{ 'selected' if run and r.id == run.id }}>
+        {{ r.started_at | ist('%d %b, %H:%M') }} — {{ r.accounts_considered }} accounts,
+        {%- if f and f.causal.rupees_paise %} {{ f.causal.rupees_paise | rupees }} recovered
+        {%- elif r.dry_run %} rehearsal
+        {%- else %} nothing yet{% endif %}
+      </option>
+    {% endfor %}
+  </select>
+  <noscript><button class="btn btn-sm" type="submit">Go</button></noscript>
+</form>
+{% endblock %}
+
 {% block body %}
 
-<h1>Recovery</h1>
-<p class="lede">
-  Money recovered, scoped to one run of the batch runner. Two figures, because the honest number
-  and the impressive number are not usually the same one.
-</p>
-
-<div class="filters">
-  <form method="get" style="display:flex;gap:8px;align-items:center;margin:0">
-    <label for="run" style="color:var(--muted);font-size:13px">Run</label>
-    <select name="run" id="run" onchange="this.form.submit()">
-      {% for r in runs %}
-        <option value="{{ r.id }}" {% if run and r.id == run.id %}selected{% endif %}>
-          {{ r.started_at | ist }} IST
-          &mdash; {{ r.accounts_considered }} accounts{% if r.dry_run %} (dry run){% endif %}
-        </option>
-      {% endfor %}
-    </select>
-    <noscript><button type="submit">Go</button></noscript>
-  </form>
-</div>
-
 {% if not figures %}
-  <div class="empty">No runs yet. Run <code>python -m scripts.run_batch</code> first.</div>
+  <div class="card"><div class="empty">
+    <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3v18h18M7 15l4-5 3 3 5-7"/></svg></div>
+    <h3>No batches yet</h3><p>Run one from <a href="/ui/home" style="color:var(--brand);font-weight:600">Overview</a>.</p>
+  </div></div>
 {% else %}
 
-<div class="scroll" style="margin-bottom:18px">
-<table>
-  <thead>
-    <tr>
-      <th>Figure</th>
-      <th class="num">Recovered</th>
-      <th class="num">Paid in full</th>
-      <th class="num">Partially recovered</th>
-      <th>What it counts</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><span class="pill pill-ok">headline</span> <strong>Causal</strong></td>
-      <td class="num" style="font-size:19px;font-weight:700">{{ figures.causal.rupees_paise | rupees }}</td>
-      <td class="num">{{ figures.causal.invoices_paid_in_full }}</td>
-      <td class="num">{{ figures.causal.invoices_partially_recovered }}</td>
-      <td>Money received against invoices <strong>this run acted on</strong>. No upper time bound &mdash; recovery is not instant.</td>
-    </tr>
-    <tr>
-      <td><span class="pill pill-mute">context</span> Time-window</td>
-      <td class="num" style="font-size:19px">{{ figures.time_window.rupees_paise | rupees }}</td>
-      <td class="num">{{ figures.time_window.invoices_paid_in_full }}</td>
-      <td class="num">{{ figures.time_window.invoices_partially_recovered }}</td>
-      <td>Everything received while the run was open, regardless of cause.</td>
-    </tr>
-  </tbody>
-</table>
+<div class="grid g3" style="margin-bottom:14px">
+  <div class="card kpi" style="border-color:var(--brand)">
+    <div class="lab"><span class="b b-ok" style="padding:1px 5px">Headline</span> Causal recovery</div>
+    <div class="val" style="font-size:32px;color:{{ 'var(--ok)' if figures.causal.rupees_paise else 'inherit' }}">
+      {{ figures.causal.rupees_paise | rupees }}
+    </div>
+    <div class="meta">
+      {{ figures.causal.invoices_paid_in_full }} paid in full ·
+      {{ figures.causal.invoices_partially_recovered }} partial
+    </div>
+    <div class="muted t-sm" style="margin-top:9px">Money received against invoices this batch acted on and the gate approved. No closing time.</div>
+  </div>
+
+  <div class="card kpi">
+    <div class="lab"><span class="b b-mute" style="padding:1px 5px">Context</span> Time-window</div>
+    <div class="val" style="font-size:32px">{{ figures.time_window.rupees_paise | rupees }}</div>
+    <div class="meta">
+      {{ figures.time_window.invoices_paid_in_full }} paid in full ·
+      {{ figures.time_window.invoices_partially_recovered }} partial
+    </div>
+    <div class="muted t-sm" style="margin-top:9px">Everything that arrived while the batch was open, for any reason.</div>
+  </div>
+
+  <div class="card kpi">
+    <div class="lab">Batch</div>
+    <div class="val sm" style="padding-top:2px">{{ figures.accounts_considered }} accounts</div>
+    <div class="meta">{{ run.started_at | ist('%d %b %Y, %H:%M') }} IST</div>
+    <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+      <span class="b b-ok">{{ figures.actions_executed }} sent</span>
+      <span class="b b-warn">{{ figures.actions_approved }} approved</span>
+      <span class="b b-stop">{{ figures.actions_refused }} refused</span>
+      {% if run.dry_run %}<span class="b b-mute">rehearsal</span>{% endif %}
+      {% if run.window_overridden %}<span class="b b-warn">window widened</span>{% endif %}
+    </div>
+    <div style="margin-top:11px"><a class="btn btn-sm" href="/ui/audit?run={{ run.id }}">View every verdict →</a></div>
+  </div>
 </div>
 
 {% if figures.diverges %}
-<div class="note">
-  <strong>The two figures differ, and that is expected.</strong>
-  Time-window counts money that arrived during the run for any reason; causal counts only invoices
-  the run actually acted on and the gate approved.
-  <p style="margin:10px 0 0">
-    Neither figure bounds the other. Time-window runs ahead when money arrives mid-run for reasons
-    that have nothing to do with the run &mdash; including invoices where <strong>the gate refused
-    to make contact and the counterparty paid anyway</strong>, which is money this screen never
-    claims. Causal runs ahead when a run finishes in seconds and the payments it caused land hours
-    later, which leaves time-window counting almost nothing. Causal is the headline either way,
-    because it is the only one of the two that can name the invoices it counted &mdash; the same
-    argument the audit log makes, expressed as a number.
-  </p>
+<div class="card">
+  <div class="card-h"><h2>Why the two figures differ</h2></div>
+  <div class="card-b t-sm" style="color:var(--ink-2);max-width:92ch">
+    <strong style="color:var(--ink)">Neither figure bounds the other.</strong>
+    Time-window runs ahead when money arrives mid-batch for unrelated reasons — including invoices
+    where <strong style="color:var(--ink)">the gate refused contact and the customer paid anyway</strong>,
+    which is money this screen never claims. Causal runs ahead when a batch finishes in seconds and
+    the payments it caused land hours later.
+    <strong style="color:var(--ink)">Causal is the headline either way</strong>, because it is the
+    only one that can name the invoices it counted.
+  </div>
 </div>
 {% else %}
-<div class="note">Both figures agree for this run.</div>
+<div class="card"><div class="card-b t-sm muted">Both figures agree for this batch.</div></div>
 {% endif %}
 
 {% if figures.dry_run %}
-<div class="note warn">
-  <strong>This was a dry run.</strong> No payment link was created and nothing was sent, so it
-  claims no causal recovery however much money arrived while it was running.
+<div class="card" style="margin-top:12px;border-color:var(--warn)">
+  <div class="card-b" style="display:flex;gap:11px;align-items:center">
+    <span class="b b-warn">Rehearsal</span>
+    <span class="t-sm">No payment link was created and nothing was sent, so this batch claims no
+    recovery however much money arrived while it ran.</span>
+  </div>
 </div>
 {% endif %}
 
-<div class="scroll">
-<table>
-  <thead>
-    <tr><th>Run</th><th class="num">Accounts</th><th class="num">Executed</th><th class="num">Approved</th><th class="num">Refused</th><th>Window</th><th>Started</th></tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td class="mono">{{ run.id }}</td>
-      <td class="num">{{ figures.accounts_considered }}</td>
-      <td class="num">{{ figures.actions_executed }}</td>
-      <td class="num">{{ figures.actions_approved }}</td>
-      <td class="num">{{ figures.actions_refused }}</td>
-      <td>
-        {{ '%02d'|format(run.contact_hour_start) }}:00&ndash;{{ '%02d'|format(run.contact_hour_end) }}:00 IST
-        {% if run.window_overridden %}<span class="pill pill-warn">widened</span>{% endif %}
-      </td>
-      <td class="mono">{{ run.started_at | ist('%d %b %Y %H:%M') }} IST</td>
-    </tr>
-  </tbody>
-</table>
-</div>
-
-<p class="lede" style="margin-top:14px">
-  <a href="/ui/audit?run={{ run.id }}">See every verdict from this run &rarr;</a>
-</p>
-
 {% endif %}
-
 {% endblock %}

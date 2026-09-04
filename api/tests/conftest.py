@@ -199,6 +199,12 @@ def api_merchant(db_available: None) -> Iterator[uuid.UUID]:
             {"m": merchant_id},
         )
         session.execute(text("DELETE FROM actions WHERE merchant_id = :m"), {"m": merchant_id})
+        # After actions, which carry the FK to it. Missing here until the UI grew a button that
+        # starts a run: no test had ever created one for this merchant, so the gap stayed
+        # invisible and then surfaced as an FK violation on the merchant delete.
+        session.execute(
+            text("DELETE FROM recovery_runs WHERE merchant_id = :m"), {"m": merchant_id}
+        )
         session.execute(text("DELETE FROM invoices WHERE merchant_id = :m"), {"m": merchant_id})
         session.execute(
             text(

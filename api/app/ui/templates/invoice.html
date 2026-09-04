@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+
+{% block topbar %}
+<a class="btn btn-sm" href="/ui/worklist">← Back to at-risk</a>
+<a class="btn btn-sm" href="/ui/audit">View audit</a>
+{% endblock %}
+
+{% block body %}
+
+<div class="grid g6" style="margin-bottom:14px">
+  <div class="card kpi" style="grid-column:span 2;border-color:var(--brand)">
+    <div class="lab">Potential recovery</div>
+    <div class="val" style="font-size:30px">{{ invoice.outstanding_paise | rupees }}</div>
+    <div class="meta">
+      {% if invoice.outstanding_paise != invoice.amount_paise %}
+        {{ (invoice.amount_paise - invoice.outstanding_paise) | rupees }} of
+        {{ invoice.amount_paise | rupees }} already recovered
+      {% else %}
+        invoiced {{ invoice.amount_paise | rupees }}
+      {% endif %}
+    </div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Risk</div>
+    <div class="val sm" style="padding-top:3px">
+      {% if invoice.days_past_due > 90 %}<span class="b b-stop">HIGH</span>
+      {% elif invoice.days_past_due > 45 %}<span class="b b-warn">MEDIUM</span>
+      {% else %}<span class="b b-info">LOW</span>{% endif %}
+    </div>
+    <div class="meta">{{ invoice.days_past_due }} days overdue</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Stage</div>
+    <div class="val sm" style="padding-top:3px">
+      <span class="b b-{{ 'stop' if invoice.recovery_state in ('stopped','escalated','broken_promise') else 'ok' if invoice.recovery_state == 'settled' else 'warn' if invoice.recovery_state == 'human_review' else 'info' }}">
+        {{ invoice.recovery_state.replace('_',' ') }}
+      </span>
+    </div>
+    <div class="meta">{% if invoice.stop_reason %}{{ invoice.stop_reason.replace('_',' ') }}{% else %}tone tier {{ invoice.current_tone_tier }}{% endif %}</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Attempts</div>
+    <div class="val">{{ invoice.touch_count }}</div>
+    <div class="meta">confirmed contacts</div>
+  </div>
+  <div class="card kpi">
+    <div class="lab">Risk score</div>
+    <div class="val sm">{% if invoice.priority_score %}{{ '%.0f'|format(invoice.priority_score) }}{% else %}—{% endif %}</div>
+    <div class="meta">recoverable value rank</div>
+  </div>
+</div>
+
+<div class="grid g21" style="margin-bottom:14px">
+
+  <div class="card">
+    <div class="card-h">
+      <h2>AI diagnosis</h2>
+      <span class="b b-mute">{{ invoice.invoice_number }}</span>
+    </div>
+    <div class="card-b">
+      <div class="steps">
+        <div class="step">
+          <div class="rail"><div class="node done">1</div><div class="line"></div></div>
+          <div class="body">
+            <div class="h">Signal detected</div>
+            <div class="s">{{ invoice.days_past_due }} days past due · due {{ invoice.due_date.strftime('%d %b %Y') }}{% if invoice.crosses_msme_45 %} · past MSME 45-day limit{% endif %}</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="rail"><div class="node done">2</div><div class="line"></div></div>
+          <div class="body">
+            <div class="h">Root cause <span class="b b-mute">{{ cause_labels.get(invoice.inferred_cause, invoice.inferred_cause) }}</span></div>
+            <div class="s">{{ invoice.priority_reason or 'Not yet scored.' }}</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="rail"><div class="node {{ 'done' if actions else '' }}">3</div><div class="line"></div></div>
+          <div class="body">
+            <div class="h">Intervention selected
+              {% if actions %}<span class="b b-info">{{ actions[0].type.replace('_',' ') }}</span>{% endif %}
+            </div>
+            <div class="s">{% if actions %}{{ actions[0].rationale }}{% else %}No action proposed yet.{% endif %}</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="rail">
+            {% set last = actions[0] if actions else None %}
+            <div class="node {{ 'stop' if last and last.gate_failure_reason else 'done' if last else '' }}">4</div>
+            <div class="line"></div>
+          </div>
+          <div class="body">
+            <div class="h">Policy check
+              {% if last and last.gate_failure_reason %}<span class="b b-stop">refused</span>
+              {% elif last %}<span class="b b-ok">passed</span>{% endif %}
+            </div>
+            <div class="s">{% if last and last.gate_failure_reason %}{{ last.gate_failure_reason.replace('_',' ') }}{% else %}All checks evaluated and recorded.{% endif %}</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="rail"><div class="node {{ 'done' if invoice.recovery_state == 'settled' else 'warn' if invoice.outstanding_paise < invoice.amount_paise else '' }}">5</div></div>
+          <div class="body">
+            <div class="h">Outcome</div>
+            <div class="s">
+              {% if invoice.recovery_state == 'settled' %}Recovered in full.
+              {% elif invoice.outstanding_paise < invoice.amount_paise %}{{ (invoice.amount_paise - invoice.outstanding_paise) | rupees }} recovered, {{ invoice.outstanding_paise | rupees }} still open.
+              {% else %}Nothing recovered yet.{% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-h"><h2>{{ counterparty.name }}</h2></div>
+      <div class="card-b">
+        {% for c in contacts %}
+          <div style="margin-bottom:{{ '0' if loop.last else '10px' }}">
+            <div class="strong t-sm">{{ c.name }}
+              {% if c.is_primary %}<span class="b b-ok">primary</span>{% endif %}
+              {% if c.is_stale %}<span class="b b-stop">stale</span>{% endif %}
+            </div>
+            <div class="mono muted">{{ c.email or c.phone or '—' }}</div>
+          </div>
+        {% else %}
+          <div class="t-sm muted">No contact on file — nothing can be sent.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>Payment link</h2></div>
+      <div class="card-b">
+        {% for l in links %}
+          <div style="margin-bottom:{{ '0' if loop.last else '12px' }}">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <span class="b b-{{ 'ok' if l.status == 'paid' else 'warn' if l.status == 'partially_paid' else 'mute' }}">{{ l.status.replace('_',' ') }}</span>
+              <span class="strong">{{ l.amount_paise | rupees }}</span>
+              {% if l.accept_partial %}<span class="b b-mute" data-tip="Above the Razorpay link ceiling; collected in tranches">part-payable</span>{% endif %}
+            </div>
+            <a class="mono" href="{{ l.short_url }}" target="_blank" rel="noopener" style="color:var(--brand)">{{ l.short_url }}</a>
+          </div>
+        {% else %}
+          <div class="t-sm muted">None yet. The agent creates one when it decides to chase.</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if promises %}
+<div class="card" style="margin-bottom:14px">
+  <div class="card-h"><h2>Promises to pay</h2></div>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Promised for</th><th class="num">Amount</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for p in promises %}
+      <tr>
+        <td>{{ p.promised_date.strftime('%d %b %Y') }}</td>
+        <td class="num">{{ p.promised_amount_paise | rupees if p.promised_amount_paise else '—' }}</td>
+        <td><span class="b b-{{ 'ok' if p.status == 'kept' else 'stop' if p.status == 'broken' else 'mute' }}">{{ p.status }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-h">
+    <h2>Recovery workflow</h2>
+    <span class="b b-mute">{{ actions|length }} action{{ '' if actions|length == 1 else 's' }}</span>
+    <span class="muted t-sm" style="margin-left:auto">Newest first · expand to read the message</span>
+  </div>
+
+  {% if not actions %}
+    <div class="empty">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+      <h3>Not yet worked</h3>
+      <p>This invoice has not come up in a batch. Start one from <a href="/ui/home" style="color:var(--brand);font-weight:600">Overview</a>.</p>
+    </div>
+  {% else %}
+    <div class="card-b" style="padding-top:14px">
+      <div class="steps">
+      {% for a in actions %}
+        {% set m = messages.get(a.id) %}
+        {% set failed = a.gate_verdicts | selectattr('passed', 'equalto', false) | list %}
+        <div class="step">
+          <div class="rail">
+            <div class="node {{ 'stop' if a.status in ('gated_fail','revoked','failed') else 'done' if a.status == 'executed' else 'warn' }}">
+              {% if a.status in ('gated_fail','revoked','failed') %}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              {% elif a.status == 'executed' %}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+              {% else %}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="8"/></svg>
+              {% endif %}
+            </div>
+            <div class="line"></div>
+          </div>
+          <div class="body">
+            <div class="h">
+              {{ a.type.replace('_',' ') | capitalize }}
+              <span class="b b-{{ 'stop' if a.status in ('gated_fail','revoked','failed') else 'ok' if a.status == 'executed' else 'warn' }}">{{ a.status.replace('_',' ') }}</span>
+              {% if a.tone_tier %}<span class="b b-mute">Tier {{ a.tone_tier }}</span>{% endif %}
+              <span class="muted t-sm" style="margin-left:auto;font-weight:400">{{ a.created_at | ist('%d %b %Y, %H:%M') }} IST</span>
+            </div>
+            <div class="s">{{ a.rationale }}</div>
+
+            {% if failed %}
+              <div style="margin-top:7px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                <span class="t-sm strong" style="color:var(--stop)">Stopped by</span>
+                {% for f in failed %}<span class="b b-stop" data-tip="{{ f.reason or '' }}">{{ f.check.replace('_',' ') }}</span>{% endfor %}
+              </div>
+              {% for f in failed %}{% if f.reason %}<div class="s" style="margin-top:3px">{{ f.reason }}</div>{% endif %}{% endfor %}
+            {% elif a.gate_verdicts %}
+              <div style="margin-top:7px"><span class="b b-ok">all {{ a.gate_verdicts|length }} checks passed</span></div>
+            {% endif %}
+
+            {% if m %}
+              <details class="exp" style="margin-top:9px">
+                <summary>
+                  <span class="b b-{{ 'ok' if m.delivery_status in ('sent','delivered') else 'mute' }}">{{ m.delivery_status }}</span>
+                  <span class="b b-mute">{{ m.channel }}</span>
+                  <span class="b b-mute">{{ 'model-written' if m.source == 'llm' else 'template' }}</span>
+                  <span class="t-sm" style="color:var(--brand);font-weight:600">Read message ▾</span>
+                </summary>
+                <div style="margin-top:9px;border:1px solid var(--line);border-radius:8px;overflow:hidden">
+                  {% if m.subject %}
+                    <div style="padding:9px 13px;background:var(--surface-2);border-bottom:1px solid var(--line-2)">
+                      <span class="muted t-sm">Subject</span>
+                      <div class="strong t-sm">{{ m.subject }}</div>
+                    </div>
+                  {% endif %}
+                  <pre style="margin:0;padding:13px;white-space:pre-wrap;word-break:break-word;font:13px/1.6 inherit;background:var(--surface)">{{ m.body }}</pre>
+                  {% if m.provider_message_id %}
+                    <div style="padding:8px 13px;border-top:1px solid var(--line-2);background:var(--surface-2)">
+                      <span class="muted t-sm">Provider id</span> <span class="mono">{{ m.provider_message_id }}</span>
+                    </div>
+                  {% endif %}
+                </div>
+              </details>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+</div>
+
+{% endblock %}

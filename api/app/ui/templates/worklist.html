@@ -1,86 +1,105 @@
 {% extends "base.html" %}
+
+{% block topbar %}
+<span class="b b-mute">{{ matched }} invoices</span>
+<span class="b b-stop">{{ matched_value | rupees }} at risk</span>
+{% if matched > rows|length %}<span class="b b-mute" data-tip="Ranked by recoverable value">top {{ rows|length }} shown</span>{% endif %}
+{% endblock %}
+
 {% block body %}
 
-<h1>Worklist</h1>
-<p class="lede">
-  Ranked by <strong>recoverable money</strong> &mdash; probability of collection &times; amount
-  &times; urgency &mdash; not by age. Every row carries the reason for its position, which is what
-  separates this from an aging report.
-</p>
+<form method="get" class="filters" style="margin-bottom:14px">
+  <div class="search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input class="inp" name="q" value="{{ q }}" placeholder="Invoice or customer" autocomplete="off">
+  </div>
+  <select class="inp" name="cause" onchange="this.form.submit()">
+    <option value="">All causes</option>
+    {% for c, n in causes %}
+      <option value="{{ c }}" {{ 'selected' if cause == c }}>{{ cause_labels.get(c, c) }} ({{ n }})</option>
+    {% endfor %}
+  </select>
+  <select class="inp" name="state" onchange="this.form.submit()">
+    <option value="">All stages</option>
+    {% for s in states %}
+      <option value="{{ s }}" {{ 'selected' if state == s }}>{{ s.replace('_',' ') | capitalize }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn btn-sm" type="submit">Apply</button>
+  {% if q or cause or state %}<a class="btn btn-sm" href="/ui/worklist">Clear</a>{% endif %}
+  {% if unscored %}<span class="b b-warn">{{ unscored }} unscored</span>{% endif %}
+</form>
 
-<div class="filters">
-  <span class="chip on">{{ rows|length }} shown</span>
-  <span class="chip">{{ total_outstanding | rupees }} outstanding</span>
-  {% if unscored %}
-    <span class="chip" style="border-color:var(--warn);color:var(--warn)">
-      {{ unscored }} unscored &mdash; run the rescore
-    </span>
+<div class="card">
+  {% if not rows %}
+    <div class="empty">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></div>
+      <h3>{% if q or cause or state %}No matches{% else %}Nothing at risk{% endif %}</h3>
+      <p>{% if q or cause or state %}Try a different filter, or <a href="/ui/worklist" style="color:var(--brand);font-weight:600">clear all</a>.{% else %}Every invoice on this book is settled.{% endif %}</p>
+    </div>
+  {% else %}
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:34px">#</th>
+          <th>Customer</th>
+          <th>Invoice</th>
+          <th class="num">At risk</th>
+          <th class="num">Overdue</th>
+          <th>Root cause</th>
+          <th class="num" data-tip="Ranked by recoverable value: probability of collection × amount × urgency — not by age">Risk score ⓘ</th>
+          <th>Stage</th>
+          <th style="min-width:230px" data-tip="Every row states its own reason, in plain English">Why this rank</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for invoice, cp in rows %}
+        <tr>
+          <td class="muted mono">{{ loop.index }}</td>
+          <td class="strong">{{ cp.name }}</td>
+          <td>
+            <a class="mono" href="/ui/invoice/{{ invoice.id }}" style="color:var(--brand);font-weight:600">{{ invoice.invoice_number }}</a>
+            {% if invoice.crosses_msme_45 %}<span class="b b-warn" data-tip="Past the MSME 45-day statutory limit">MSME 45</span>{% endif %}
+          </td>
+          <td class="num strong">{{ invoice.outstanding_paise | rupees }}</td>
+          <td class="num">
+            {% if invoice.days_past_due > 90 %}<span class="b b-stop">{{ invoice.days_past_due }}d</span>
+            {% elif invoice.days_past_due > 45 %}<span class="b b-warn">{{ invoice.days_past_due }}d</span>
+            {% elif invoice.days_past_due > 0 %}<span class="b b-mute">{{ invoice.days_past_due }}d</span>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td class="t-sm">{{ cause_labels.get(invoice.inferred_cause, invoice.inferred_cause) }}</td>
+          <td class="num mono">
+            {% if invoice.priority_score is none %}<span class="muted">—</span>
+            {% else %}{{ '%.0f'|format(invoice.priority_score) }}{% endif %}
+          </td>
+          <td>
+            {% if invoice.recovery_state == 'stopped' %}<span class="b b-stop"><span class="dot"></span>Stopped</span>
+            {% elif invoice.recovery_state == 'settled' %}<span class="b b-ok"><span class="dot"></span>Recovered</span>
+            {% elif invoice.recovery_state == 'human_review' %}<span class="b b-warn"><span class="dot"></span>Needs review</span>
+            {% elif invoice.recovery_state == 'escalated' %}<span class="b b-stop"><span class="dot"></span>Escalated</span>
+            {% elif invoice.recovery_state == 'broken_promise' %}<span class="b b-stop"><span class="dot"></span>Broke promise</span>
+            {% elif invoice.recovery_state == 'promised' %}<span class="b b-info"><span class="dot"></span>Promised</span>
+            {% elif invoice.recovery_state in ('chasing','nudged') %}<span class="b b-info"><span class="dot"></span>Recovering</span>
+            {% else %}<span class="b b-mute"><span class="dot"></span>Queued</span>{% endif %}
+            {% if invoice.stop_reason %}<div class="muted t-sm" style="margin-top:2px">{{ invoice.stop_reason.replace('_',' ') }}</div>{% endif %}
+          </td>
+          <td class="muted t-sm">{{ invoice.priority_reason or 'Not yet scored.' }}</td>
+          <td class="num"><a class="btn btn-sm" href="/ui/invoice/{{ invoice.id }}">Open</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if matched > rows|length %}
+    <div class="card-b" style="border-top:1px solid var(--line-2);padding:10px 16px;display:flex;gap:10px;align-items:center">
+      <span class="muted t-sm">Top {{ rows|length }} of {{ matched }} by recoverable value</span>
+      <span class="muted t-sm" style="margin-left:auto">{{ total_outstanding | rupees }} on this page</span>
+    </div>
+  {% endif %}
   {% endif %}
 </div>
-
-{% if not rows %}
-  <div class="empty">No open invoices.</div>
-{% else %}
-<div class="scroll">
-<table>
-  <thead>
-    <tr>
-      <th>#</th>
-      <th>Invoice</th>
-      <th>Counterparty</th>
-      <th class="num">Outstanding</th>
-      <th class="num">Days late</th>
-      <th class="num">Priority</th>
-      <th>State</th>
-      <th>Why this position</th>
-    </tr>
-  </thead>
-  <tbody>
-  {% for invoice, cp in rows %}
-    <tr>
-      <td class="mono">{{ loop.index }}</td>
-      <td class="mono">
-        {{ invoice.invoice_number }}
-        {% if invoice.crosses_msme_45 %}
-          <div><span class="pill pill-warn">MSME 45</span></div>
-        {% endif %}
-      </td>
-      <td>{{ cp.name }}</td>
-      <td class="num">{{ invoice.outstanding_paise | rupees }}</td>
-      <td class="num">{{ invoice.days_past_due }}</td>
-      <td class="num mono">
-        {% if invoice.priority_score is none %}
-          <span style="color:var(--muted)">&mdash;</span>
-        {% else %}
-          {{ '%.0f'|format(invoice.priority_score) }}
-        {% endif %}
-      </td>
-      <td>
-        {% if invoice.recovery_state == 'stopped' %}
-          <span class="pill pill-stop">stopped</span>
-        {% elif invoice.recovery_state == 'settled' %}
-          <span class="pill pill-ok">settled</span>
-        {% elif invoice.recovery_state == 'human_review' %}
-          <span class="pill pill-warn">human review</span>
-        {% else %}
-          <span class="pill pill-mute">{{ invoice.recovery_state }}</span>
-        {% endif %}
-        {% if invoice.stop_reason %}
-          <div class="mono" style="color:var(--stop);font-size:11px">{{ invoice.stop_reason }}</div>
-        {% endif %}
-      </td>
-      <td style="max-width:52ch">
-        {% if invoice.priority_reason %}
-          {{ invoice.priority_reason }}
-        {% else %}
-          <span style="color:var(--muted)">Not yet scored; the nightly rescore is pending.</span>
-        {% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
-{% endif %}
 
 {% endblock %}
