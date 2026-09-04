@@ -1,5 +1,20 @@
-# Local development Postgres for `make db-up`. Production uses Neon (ADR-007);
-# DATABASE_URL is the only switch between the two.
+# PAYVRA, fully containerised: Postgres, migrations and the API.
+#
+#   docker compose up -d --build      everything, migrated, on http://localhost:8000
+#   docker compose logs -f api        follow the server
+#   docker compose down               stop, KEEPING the data
+#
+# ┌────────────────────────────────────────────────────────────────────────────────────┐
+# │ NEVER run `docker compose down -v`.                                                │
+# │                                                                                    │
+# │ The -v flag deletes the payvra_pgdata volume, and that volume holds the only copy  │
+# │ of the demo state: the Rs 3,18,154 and Rs 6,00,000 recovery runs, four real        │
+# │ Razorpay links, the delivered email, and a 390-entry hash-chained audit log. None  │
+# │ of it can be reseeded -- a reseed generates a *different* book, and the money in    │
+# │ this one was collected against links that already exist at Razorpay.               │
+# └────────────────────────────────────────────────────────────────────────────────────┘
+#
+# Production uses Neon (ADR-007); DATABASE_URL remains the only switch between the two.
 services:
   db:
     image: postgres:16
@@ -10,7 +25,8 @@ services:
       POSTGRES_DB: payvra
     ports:
       # Host 5433 -> container 5432, to avoid clashing with a native Postgres often already
-      # bound to 5432. DATABASE_URL must use 5433 to reach this container.
+      # bound to 5432. A host-side DATABASE_URL must use 5433 to reach this container;
+      # containers on this network reach it as db:5432 instead.
       - "5433:5432"
     volumes:
       - payvra_pgdata:/var/lib/postgresql/data
@@ -19,6 +35,57 @@ services:
       interval: 3s
       timeout: 5s
       retries: 20
+
+  # Runs to completion, then exits. `api` waits for it, so the server can never come up
+  # against a schema older than the code -- the failure that produces a 500 on the first
+  # page load rather than an error anyone can read.
+  #
+  # Already at head, this is a no-op. It does not seed and it does not drop anything.
+  # Deliberately no `build:` here. Two services building the same image tag race each other
+  # in buildx and one of them dies with "image already exists". `api` owns the build; compose
+  # completes every build before it starts anything, so the image is present by the time this
+  # runs even on a first `docker compose up`.
+  migrate:
+    image: payvra-api
+    container_name: payvra-migrate
+    env_file:
+      - .env
+    environment: &db_env
+      # Overrides the localhost:5433 in .env. Environment beats env_file in compose, and
+      # environment beats the dotenv file in pydantic-settings, so this is what the app
+      # reads. Inside the compose network the database is a service name, not a published
+      # host port.
+      DATABASE_URL: postgresql+psycopg://payvra:payvra@db:5432/payvra
+    command: ["alembic", "-c", "alembic.ini", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    image: payvra-api
+    container_name: payvra-api
+    env_file:
+      # Secrets live here and are injected at run time; the image itself carries none.
+      # Razorpay, Resend and the LLM keys all arrive this way.
+      - .env
+    environment: *db_env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # /ui/login is unauthenticated and touches the database, so a pass means the whole
+      # path is up -- not merely that a socket is listening.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/ui/login', timeout=3).status==200 else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
 volumes:
   payvra_pgdata:

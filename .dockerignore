@@ -1,0 +1,29 @@
+# Keep the build context small and secret-free. .venv and web/node_modules alone are
+# hundreds of megabytes and would be copied on every build for no benefit.
+.venv/
+venv/
+web/node_modules/
+web/dist/
+web/.vite/
+node_modules/
+
+.git/
+.github/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Secrets never enter the image. The api and migrate services receive them at run time
+# through compose `env_file`, so a built image carries no keys.
+.env
+.env.*
+!.env.example
+
+payvra-docs/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
