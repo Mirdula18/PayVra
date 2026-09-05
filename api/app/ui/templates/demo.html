@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+
+{% block topbar %}
+{% if state.invoice %}
+  <a class="btn btn-sm" href="/ui/demo">Change account</a>
+  <a class="btn btn-sm" href="/ui/audit">Audit log</a>
+{% endif %}
+{% endblock %}
+
+{% block body %}
+
+{% if flash_ok %}
+  <div class="card flash flash-ok"><div class="card-b">
+    <span class="b b-ok"><span class="dot"></span>Done</span>
+    <span class="strong t-sm">{{ flash_ok }}</span>
+  </div></div>
+{% endif %}
+{% if flash_err %}
+  <div class="card flash flash-err"><div class="card-b">
+    <span class="b b-stop"><span class="dot"></span>Refused</span>
+    <span class="strong t-sm">{{ flash_err }}</span>
+  </div></div>
+{% endif %}
+
+{% if not state.invoice %}
+  <div class="hero">
+    <div class="hero-txt">
+      <span class="b b-mute pill-new">DEMO MODE</span>
+      <h2>Run the whole loop on one account</h2>
+      <p>
+        Detect → diagnose → link → draft → send → track payment → escalate → recover.
+        Every step is the real code path. <strong>One invoice, one payment link.</strong>
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h2>Pick the account</h2><span class="muted t-sm">Ranked by recoverable value</span></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Customer</th><th>Invoice</th><th class="num">At risk</th><th class="num">Overdue</th><th>Stage</th><th></th></tr></thead>
+      <tbody>
+      {% for inv, cp in candidates %}
+        <tr>
+          <td class="strong">{{ cp.name }}</td>
+          <td class="mono">{{ inv.invoice_number }}</td>
+          <td class="num strong">{{ inv.outstanding_paise | rupees }}</td>
+          <td class="num">{{ inv.days_past_due }}d</td>
+          <td><span class="b b-mute">{{ inv.recovery_state.replace('_',' ') }}</span></td>
+          <td class="num"><a class="btn btn-p btn-sm" href="/ui/demo?invoice={{ inv.id }}">Start demo →</a></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6"><div class="empty"><h3>No eligible accounts</h3><p>Every invoice is settled or stopped.</p></div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </div>
+
+{% else %}
+
+{# --- the run --- #}
+<div class="grid g21">
+  <div>
+
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-h">
+        <h2>{{ state.counterparty.name }}</h2>
+        <span class="b b-mute mono">{{ state.invoice.invoice_number }}</span>
+        {% if state.fully_paid %}<span class="b b-ok"><span class="dot"></span>RECOVERED</span>
+        {% elif state.paid %}<span class="b b-warn"><span class="dot"></span>PART PAID</span>
+        {% else %}<span class="b b-stop"><span class="dot"></span>AT RISK</span>{% endif %}
+      </div>
+      <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:16px">
+        <div><div class="lab">Outstanding</div><div class="big">{{ state.invoice.outstanding_paise | rupees }}</div></div>
+        <div><div class="lab">Recovered</div><div class="big" style="color:var(--ok)">{{ state.recovered_paise | rupees }}</div></div>
+        <div><div class="lab">Overdue</div><div class="big">{{ state.invoice.days_past_due }}d</div></div>
+        <div><div class="lab">Tone tier</div><div class="big">T{{ state.tone_tier }}</div></div>
+        <div><div class="lab">Contacts made</div><div class="big">{{ state.touch_count }}</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h2>Sequence</h2>
+        <span class="muted t-sm" style="margin-left:auto">Status is read from the database, not remembered</span>
+      </div>
+      <div class="card-b">
+        <div class="steps">
+        {% for s in state.steps %}
+          <div class="step">
+            <div class="rail">
+              <div class="node {{ 'done' if s.state == 'done' else ('warn' if s.state in ('active','waiting') else '') }}">
+                {% if s.state == 'done' %}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>
+                {% elif s.state == 'waiting' %}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                {% else %}{{ loop.index }}{% endif %}
+              </div>
+              <div class="line"></div>
+            </div>
+            <div class="body">
+              <div class="h">
+                {{ s.title }}
+                {% if s.state == 'done' %}<span class="b b-ok">done</span>
+                {% elif s.state == 'waiting' %}<span class="b b-warn pulse">waiting</span>
+                {% elif s.state == 'active' %}<span class="b b-info">next</span>
+                {% else %}<span class="b b-mute">pending</span>{% endif %}
+              </div>
+              <div class="s">{{ s.detail }}</div>
+
+              {# --- the controls, attached to the step they belong to --- #}
+              {% if s.key == 'link' and s.state == 'active' %}
+                <form method="post" action="/ui/demo/{{ state.invoice.id }}/link" style="margin-top:9px">
+                  <button class="btn btn-p btn-sm" type="submit">Create payment link</button>
+                </form>
+              {% elif s.key == 'link' and state.link %}
+                <a class="mono t-sm" href="{{ state.link.short_url }}" target="_blank" rel="noopener"
+                   style="color:var(--brand);font-weight:600">{{ state.link.short_url }} ↗</a>
+                <span class="b b-mute">{{ state.link.status.replace('_',' ') }}</span>
+              {% endif %}
+
+              {% if s.key == 'send' and s.state == 'active' %}
+                <form method="post" action="/ui/demo/{{ state.invoice.id }}/send" style="margin-top:9px">
+                  <details class="exp" style="margin-bottom:9px">
+                    <summary class="t-sm" style="color:var(--brand);font-weight:600">Review &amp; edit the message ▾</summary>
+                    {% if state.draft %}
+                      <div class="muted t-sm" style="margin:8px 0 4px">Subject — {{ state.draft.message.subject }}</div>
+                      <textarea name="body" class="inp" rows="9" style="width:100%;font-size:12.5px">{{ state.draft.message.body }}</textarea>
+                    {% else %}
+                      <p class="muted t-sm">No draft — the account has no contact or consent on file.</p>
+                    {% endif %}
+                  </details>
+                  <button class="btn btn-p btn-sm" type="submit">Send the reminder</button>
+                </form>
+              {% endif %}
+
+              {% if s.key == 'track' and s.state == 'waiting' %}
+                <div class="waiting-box">
+                  <span class="spinner"></span>
+                  <span class="t-sm">
+                    Asking Razorpay every few seconds — no webhook needed.
+                    {% if state.sync and state.sync.link_status %}
+                      Link is <strong>{{ state.sync.link_status.replace('_',' ') }}</strong>.
+                    {% endif %}
+                  </span>
+                </div>
+                <form method="post" action="/ui/demo/{{ state.invoice.id }}/check" style="margin-top:9px">
+                  <button class="btn btn-sm" type="submit">Check for payment now</button>
+                </form>
+              {% endif %}
+
+              {% if s.key == 'escalate' and s.state == 'active' %}
+                <form method="post" action="/ui/demo/{{ state.invoice.id }}/escalate" style="margin-top:9px">
+                  <button class="btn btn-sm" type="submit">Escalate — no payment yet</button>
+                </form>
+              {% endif %}
+            </div>
+          </div>
+        {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# --- right rail --- #}
+  <div>
+    {% if state.message %}
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-h">
+        <h2>What went out</h2>
+        <span class="b b-ok">{{ state.message.delivery_status }}</span>
+      </div>
+      <div class="card-b">
+        <div class="lab">Subject</div>
+        <div class="strong t-sm" style="margin:3px 0 10px">{{ state.message.subject }}</div>
+        <pre class="mailbody">{{ state.message.body }}</pre>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="card">
+      <div class="card-h"><h2>Guardrails on this account</h2></div>
+      <div class="card-b">
+        <dl class="kv">
+          <dt>Contact window</dt><dd>08:00–19:00 IST</dd>
+          <dt>Tone tier</dt><dd>T{{ state.tone_tier }}</dd>
+          <dt>Contacts made</dt><dd>{{ state.touch_count }}</dd>
+          <dt>Settlements</dt><dd>{{ state.settlements }}</dd>
+        </dl>
+        <p class="muted t-sm" style="margin:11px 0 0">
+          Every send re-runs all seven checks. Nothing here can skip them.
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if state.steps | selectattr('state', 'equalto', 'waiting') | list %}
+  {# Only poll while genuinely waiting on an external event -- refreshing a finished board is
+     just noise on a recording. #}
+  <meta http-equiv="refresh" content="7">
+{% endif %}
+{% endif %}
+
+<style>
+  .flash { margin-bottom: 14px; }
+  .flash .card-b { display: flex; gap: 10px; align-items: center; padding: 12px 16px; }
+  .flash-ok { border-color: var(--ok); background: var(--ok-bg); }
+  .flash-err { border-color: var(--stop); background: var(--stop-bg); }
+
+  .hero {
+    background: linear-gradient(120deg, var(--brand-2), #fff 70%);
+    border: 1px solid var(--line); border-radius: var(--r);
+    padding: 26px 28px; margin-bottom: 16px;
+  }
+  .hero h2 { margin: 10px 0 6px; font-size: 22px; letter-spacing: -.02em; }
+  .hero p { margin: 0; color: var(--ink-2); max-width: 72ch; font-size: 13.5px; }
+  .pill-new { background: var(--ink); color: #fff; letter-spacing: .1em; }
+
+  .lab {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .big {
+    font-size: 21px; font-weight: 700; letter-spacing: -.02em; margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .mailbody {
+    margin: 0; padding: 13px; background: var(--surface-2); border: 1px solid var(--line-2);
+    border-radius: 9px; white-space: pre-wrap; word-break: break-word;
+    font: 12.5px/1.6 inherit; max-height: 340px; overflow-y: auto;
+  }
+
+  .waiting-box {
+    margin-top: 9px; display: flex; gap: 9px; align-items: center;
+    background: var(--warn-bg); border-radius: 8px; padding: 9px 12px; color: var(--warn);
+  }
+  .spinner {
+    width: 13px; height: 13px; border-radius: 50%; flex: none;
+    border: 2px solid rgba(180,83,9,.25); border-top-color: var(--warn);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .pulse { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .5; } }
+</style>
+
+{% endblock %}

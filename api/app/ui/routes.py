@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Cookie, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -43,6 +44,8 @@ from app.models.payment_link import PaymentLink
 from app.models.promise import Promise
 from app.models.recovery_run import RecoveryRun
 from app.money import paise_to_exact
+from app.reconciliation.manual import OFFLINE_METHODS
+from app.ui import actions as human
 
 router = APIRouter(prefix="/ui", tags=["ui"])
 
@@ -738,7 +741,12 @@ def worklist(
 
 @router.get("/invoice/{invoice_id}", response_class=HTMLResponse)
 def invoice_detail(
-    request: Request, db: DbDep, merchant_id: UiMerchant, invoice_id: uuid.UUID
+    request: Request,
+    db: DbDep,
+    merchant_id: UiMerchant,
+    invoice_id: uuid.UUID,
+    ok: Annotated[str | None, Query()] = None,
+    err: Annotated[str | None, Query()] = None,
 ) -> Any:
     """Everything about one receivable on one page, including **the messages themselves**.
 
@@ -808,7 +816,218 @@ def invoice_detail(
             "links": links,
             "contacts": contacts,
             "promises": promises,
+            "flash_ok": ok,
+            "flash_err": err,
+            "draft": human.preview(db, invoice.id, merchant_id),
+            "offline_methods": OFFLINE_METHODS,
+            "needs_approval": invoice.recovery_state == RecoveryState.HUMAN_REVIEW.value,
+            "is_disputed": invoice.stop_reason == "disputed",
+            "is_stopped": invoice.recovery_state == RecoveryState.STOPPED.value,
+            "is_settled": invoice.recovery_state == RecoveryState.SETTLED.value,
         },
+    )
+
+
+# --- demo mode: the whole loop, one account, one step at a time --------------------------------
+
+
+@router.get("/demo", response_class=HTMLResponse)
+def demo(
+    request: Request,
+    db: DbDep,
+    merchant_id: UiMerchant,
+    invoice: Annotated[str | None, Query()] = None,
+    ok: Annotated[str | None, Query()] = None,
+    err: Annotated[str | None, Query()] = None,
+) -> Any:
+    """A scripted run of the real loop on **one** account, for recording.
+
+    **Nothing here is simulated and no step is faked.** Each one calls the same code the batch
+    runner calls, and every step's status is *derived from the database* rather than stored in a
+    wizard -- so the board cannot drift from what actually happened, and reloading mid-demo shows
+    the truth rather than a remembered position. Pay the link on a phone and the next refresh
+    shows the webhook landing, because the webhook is what moved the row.
+
+    Scoped to one invoice on purpose: a payment link is real money against a finite test-mode
+    budget, so a demo that created five would cost four more than the story needs.
+    """
+    # Poll Razorpay on every render of a chosen account. That is what makes the waiting step
+    # resolve on its own after a payment, with no webhook tunnel in the picture.
+    chosen = human.demo_state(db, merchant_id, invoice, poll=bool(invoice))
+    return templates.TemplateResponse(
+        request,
+        "demo.html",
+        _shell(db, merchant_id, "demo", "Demo Mode")
+        | {
+            "state": chosen,
+            "candidates": human.demo_candidates(db, merchant_id),
+            "flash_ok": ok,
+            "flash_err": err,
+        },
+    )
+
+
+def _demo_back(invoice_id: uuid.UUID, outcome: human.Outcome) -> RedirectResponse:
+    flag = "ok" if outcome.ok else "err"
+    return RedirectResponse(
+        url=f"/ui/demo?invoice={invoice_id}&{flag}={quote(outcome.message)}", status_code=303
+    )
+
+
+@router.post("/demo/{invoice_id}/link")
+def demo_link(db: DbDep, merchant_id: UiMerchant, invoice_id: uuid.UUID) -> RedirectResponse:
+    """Step 2. Create the real Razorpay payment link for this one invoice."""
+    return _demo_back(invoice_id, human.demo_create_link(db, invoice_id, merchant_id))
+
+
+@router.post("/demo/{invoice_id}/send")
+def demo_send(
+    db: DbDep,
+    merchant_id: UiMerchant,
+    invoice_id: uuid.UUID,
+    body: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    """Step 3-4. Draft, gate, send. The approval is recorded; the gate still decides."""
+    return _demo_back(
+        invoice_id,
+        human.approve_and_send(
+            db, invoice_id, merchant_id, actor_id=UI_ACTOR, body_override=body
+        ),
+    )
+
+
+@router.post("/demo/{invoice_id}/check")
+def demo_check(db: DbDep, merchant_id: UiMerchant, invoice_id: uuid.UUID) -> RedirectResponse:
+    """Ask Razorpay for this link's status now, rather than waiting for the next refresh."""
+    result = human.check_payment(db, invoice_id, merchant_id)
+    if result.error:
+        outcome = human.Outcome(False, f"Could not reach Razorpay: {result.error}")
+    elif result.changed:
+        outcome = human.Outcome(
+            True,
+            f"Payment found — {paise_to_exact(result.applied_paise)} settled and outreach "
+            f"called off." if result.fully_settled else
+            f"Part payment found — {paise_to_exact(result.applied_paise)} settled.",
+        )
+    else:
+        outcome = human.Outcome(
+            False, f"No new payment yet (Razorpay says the link is {result.link_status})."
+        )
+    return _demo_back(invoice_id, outcome)
+
+
+@router.post("/demo/{invoice_id}/escalate")
+def demo_escalate(db: DbDep, merchant_id: UiMerchant, invoice_id: uuid.UUID) -> RedirectResponse:
+    """Step 6. They did not pay in time -- raise the tone tier for the next attempt."""
+    return _demo_back(invoice_id, human.escalate(db, invoice_id, merchant_id, actor_id=UI_ACTOR))
+
+
+# --- human-in-the-loop: one account at a time --------------------------------------------------
+
+#: Who the audit trail records for a UI action. The placeholder auth carries no user identity
+#: (the token *is* the merchant id), so naming the surface is the honest maximum -- "merchant" on
+#: its own would imply a person the system cannot actually identify.
+UI_ACTOR = "merchant:ui"
+
+
+def _back(invoice_id: uuid.UUID, outcome: human.Outcome) -> RedirectResponse:
+    """Back to the account, carrying the result as a flash message.
+
+    The banner is a query parameter rather than a session flash because these screens hold no
+    server-side session at all. It survives one redirect and no more, which is the whole life a
+    flash needs.
+    """
+    flag = "ok" if outcome.ok else "err"
+    return RedirectResponse(
+        url=f"/ui/invoice/{invoice_id}?{flag}={quote(outcome.message)}", status_code=303
+    )
+
+
+@router.post("/invoice/{invoice_id}/send")
+def act_send(
+    db: DbDep,
+    merchant_id: UiMerchant,
+    invoice_id: uuid.UUID,
+    body: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    """Approve the reminder and send it. **Re-gates first; the approval is not a bypass.**"""
+    return _back(
+        invoice_id,
+        human.approve_and_send(
+            db, invoice_id, merchant_id, actor_id=UI_ACTOR, body_override=body
+        ),
+    )
+
+
+@router.post("/invoice/{invoice_id}/contact")
+def act_contact(
+    db: DbDep,
+    merchant_id: UiMerchant,
+    invoice_id: uuid.UUID,
+    email_address: Annotated[str, Form()],
+    name: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    return _back(
+        invoice_id,
+        human.update_contact(
+            db, invoice_id, merchant_id, email_address=email_address, name=name, actor_id=UI_ACTOR
+        ),
+    )
+
+
+@router.post("/invoice/{invoice_id}/dispute")
+def act_dispute(
+    db: DbDep,
+    merchant_id: UiMerchant,
+    invoice_id: uuid.UUID,
+    reason: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    return _back(
+        invoice_id,
+        human.mark_disputed(db, invoice_id, merchant_id, reason=reason, actor_id=UI_ACTOR),
+    )
+
+
+@router.post("/invoice/{invoice_id}/resolve")
+def act_resolve(db: DbDep, merchant_id: UiMerchant, invoice_id: uuid.UUID) -> RedirectResponse:
+    return _back(
+        invoice_id, human.resolve_dispute(db, invoice_id, merchant_id, actor_id=UI_ACTOR)
+    )
+
+
+@router.post("/invoice/{invoice_id}/stop")
+def act_stop(
+    db: DbDep,
+    merchant_id: UiMerchant,
+    invoice_id: uuid.UUID,
+    reason: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    return _back(
+        invoice_id,
+        human.stop_chasing(db, invoice_id, merchant_id, reason=reason, actor_id=UI_ACTOR),
+    )
+
+
+@router.post("/invoice/{invoice_id}/paid")
+def act_paid(
+    db: DbDep,
+    merchant_id: UiMerchant,
+    invoice_id: uuid.UUID,
+    amount: Annotated[str, Form()],
+    method: Annotated[str, Form()] = "neft",
+    reference: Annotated[str | None, Form()] = None,
+) -> RedirectResponse:
+    return _back(
+        invoice_id,
+        human.mark_paid(
+            db,
+            invoice_id,
+            merchant_id,
+            amount_rupees=amount,
+            method=method,
+            reference=reference,
+            actor_id=UI_ACTOR,
+        ),
     )
 
 

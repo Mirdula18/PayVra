@@ -7,6 +7,23 @@
 
 {% block body %}
 
+{% if flash_ok %}
+  <div class="card" style="margin-bottom:14px;border-color:var(--ok);background:var(--ok-bg)">
+    <div class="card-b" style="display:flex;gap:10px;align-items:center;padding:12px 16px">
+      <span class="b b-ok"><span class="dot"></span>Done</span>
+      <span class="t-sm strong">{{ flash_ok }}</span>
+    </div>
+  </div>
+{% endif %}
+{% if flash_err %}
+  <div class="card" style="margin-bottom:14px;border-color:var(--stop);background:var(--stop-bg)">
+    <div class="card-b" style="display:flex;gap:10px;align-items:center;padding:12px 16px">
+      <span class="b b-stop"><span class="dot"></span>Not done</span>
+      <span class="t-sm strong">{{ flash_err }}</span>
+    </div>
+  </div>
+{% endif %}
+
 <div class="grid g6" style="margin-bottom:14px">
   <div class="card kpi" style="grid-column:span 2;border-color:var(--brand)">
     <div class="lab">Potential recovery</div>
@@ -148,6 +165,128 @@
     </div>
   </div>
 </div>
+
+<div class="card" style="margin-bottom:14px;border-color:var(--brand)">
+  <div class="card-h">
+    <h2>Your move</h2>
+    {% if is_settled %}<span class="b b-ok">Recovered — nothing to do</span>
+    {% elif needs_approval %}<span class="b b-warn"><span class="dot"></span>Waiting on you</span>
+    {% elif is_disputed %}<span class="b b-stop">Frozen — disputed</span>
+    {% elif is_stopped %}<span class="b b-stop">Outreach stopped</span>
+    {% else %}<span class="b b-info">Agent is handling this</span>{% endif %}
+    <span class="muted t-sm" style="margin-left:auto">Every action here is recorded in the audit log</span>
+  </div>
+
+  <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
+
+    {% if not is_settled %}
+    <div class="act-card">
+      <div class="kpi lab">Send a reminder</div>
+      <p class="muted t-sm" style="margin:6px 0 9px">
+        {% if needs_approval %}This account is above the limit the agent may act on alone. Your approval lets it through &mdash; <strong>the seven rules still run.</strong>
+        {% else %}Review the draft, edit it if you want, then send.{% endif %}
+      </p>
+      <form method="post" action="/ui/invoice/{{ invoice.id }}/send">
+        <details class="exp" style="margin-bottom:9px">
+          <summary class="t-sm" style="color:var(--brand);font-weight:600">Review &amp; edit the message ▾</summary>
+          {% if draft %}
+            <div class="muted t-sm" style="margin:8px 0 4px">Subject &mdash; {{ draft.message.subject }}</div>
+            <textarea name="body" class="inp" rows="9" style="width:100%;font-size:12.5px;line-height:1.55">{{ draft.message.body }}</textarea>
+            <p class="muted t-sm" style="margin:6px 0 0">
+              The payment link is inserted when you send. Leave the text alone to send the agent's own wording.
+            </p>
+          {% else %}
+            <p class="muted t-sm" style="margin:8px 0 0">No draft could be produced &mdash; usually a missing contact.</p>
+          {% endif %}
+        </details>
+        <button class="btn btn-p" type="submit" {{ 'disabled' if not contacts }}>
+          {{ 'Approve &amp; send' if needs_approval else 'Send reminder' }}
+        </button>
+        {% if not contacts %}<div class="muted t-sm" style="margin-top:6px">No contact on file.</div>{% endif %}
+      </form>
+    </div>
+    {% endif %}
+
+    <div class="act-card">
+      <div class="kpi lab">Fix the contact</div>
+      <p class="muted t-sm" style="margin:6px 0 9px">
+        Emailing the wrong person? Correct it and this account goes back in the queue.
+      </p>
+      <form method="post" action="/ui/invoice/{{ invoice.id }}/contact" style="display:grid;gap:7px">
+        <input class="inp" name="email_address" type="email" required
+               placeholder="correct@customer.com"
+               value="{{ contacts[0].email if contacts else '' }}">
+        <input class="inp" name="name" placeholder="Contact name (optional)"
+               value="{{ contacts[0].name if contacts else '' }}">
+        <button class="btn" type="submit">Update contact</button>
+      </form>
+    </div>
+
+    {% if not is_settled %}
+    <div class="act-card">
+      <div class="kpi lab">They paid another way</div>
+      <p class="muted t-sm" style="margin:6px 0 9px">
+        Cheque, NEFT or UPI straight to your bank. Recording it <strong>calls off the chase immediately.</strong>
+      </p>
+      <form method="post" action="/ui/invoice/{{ invoice.id }}/paid" style="display:grid;gap:7px">
+        <input class="inp" name="amount" required inputmode="decimal"
+               placeholder="Amount in ₹ (max {{ (invoice.outstanding_paise / 100) | round(0, 'floor') | int }})">
+        <select class="inp" name="method">
+          {% for m in offline_methods %}<option value="{{ m }}">{{ m | upper }}</option>{% endfor %}
+        </select>
+        <input class="inp" name="reference" placeholder="UTR / cheque no. (optional)">
+        <button class="btn" type="submit">Record payment</button>
+      </form>
+    </div>
+    {% endif %}
+
+    {% if is_disputed %}
+      <div class="act-card">
+        <div class="kpi lab">Dispute settled?</div>
+        <p class="muted t-sm" style="margin:6px 0 9px">
+          Outreach is frozen while this is disputed. Resolving it lets the agent chase again.
+        </p>
+        <form method="post" action="/ui/invoice/{{ invoice.id }}/resolve">
+          <button class="btn" type="submit">Resolve dispute</button>
+        </form>
+      </div>
+    {% elif not is_settled %}
+      <div class="act-card">
+        <div class="kpi lab">They dispute this invoice</div>
+        <p class="muted t-sm" style="margin:6px 0 9px">
+          Freezes all outreach. Chasing a disagreement makes it worse.
+        </p>
+        <form method="post" action="/ui/invoice/{{ invoice.id }}/dispute" style="display:grid;gap:7px">
+          <input class="inp" name="reason" placeholder="What are they disputing?">
+          <button class="btn" type="submit">Mark disputed</button>
+        </form>
+      </div>
+    {% endif %}
+
+    {% if not is_settled and not is_stopped %}
+    <div class="act-card">
+      <div class="kpi lab">Stop chasing</div>
+      <p class="muted t-sm" style="margin:6px 0 9px">
+        Permanent. Recorded as <strong>your</strong> decision, not a rule&rsquo;s.
+      </p>
+      <form method="post" action="/ui/invoice/{{ invoice.id }}/stop" style="display:grid;gap:7px">
+        <input class="inp" name="reason" placeholder="Why stop? (optional)">
+        <button class="btn" type="submit"
+                onclick="return confirm('Stop chasing this invoice permanently?')">Stop outreach</button>
+      </form>
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+
+<style>
+  .act-card { border: 1px solid var(--line); border-radius: var(--r); padding: 13px 14px; background: var(--surface-2); }
+  .act-card form { margin: 0; }
+  .act-card button { width: 100%; justify-content: center; }
+  .act-card textarea { font-family: inherit; }
+  button[disabled] { opacity: .45; cursor: not-allowed; }
+</style>
 
 {% if promises %}
 <div class="card" style="margin-bottom:14px">

@@ -12,16 +12,20 @@ absent) has to hold here too or the UI is a way around it.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent import runner
 from app.enums import PaymentStatus, RecoveryState
+from app.models.action import Action
 from app.models.invoice import Invoice
 from app.models.merchant import Merchant
 from app.models.recovery_run import RecoveryRun
+from app.ui import actions
 from app.ui.routes import SESSION_COOKIE
 
 pytestmark = pytest.mark.usefixtures("db_available")
@@ -195,6 +199,225 @@ def test_another_tenants_invoice_reads_as_absent(
 ) -> None:
     """404, not 403 -- "this exists but is not yours" leaks the existence of another tenant."""
     assert signed_in.get(f"/ui/invoice/{gate_invoice.id}").status_code == 404
+
+
+# --- human in the loop ----------------------------------------------------------------------------
+
+
+def test_a_human_approval_does_not_bypass_the_gate(
+    client: TestClient, db_session: Session, gate_merchant: Merchant, gate_invoice: Invoice
+) -> None:
+    """**The whole design rests on this.**
+
+    ``check_value_threshold`` reads ``approved_by``, so an approval supplies the permission that
+    one check asks for. It supplies nothing to the other six. Approving outside contact hours, or
+    without consent, must still refuse -- otherwise the approve button is a bypass wearing a
+    different name, and every compliance claim the product makes goes with it.
+    """
+    from datetime import datetime
+
+    from app.clock import IST
+    from app.enums import ActionType, Channel
+    from app.guardrails.gate import gate
+    from app.schemas.gate import ProposedAction
+
+    gate_invoice.recovery_state = RecoveryState.HUMAN_REVIEW.value
+    gate_invoice.payment_status = PaymentStatus.UNPAID.value
+    db_session.flush()
+
+    approved = ProposedAction(
+        invoice_id=gate_invoice.id,
+        type=ActionType.SEND_MESSAGE,
+        tone_tier=3,
+        rationale="Human approved from the review queue.",
+        channel=Channel.EMAIL,
+        approved_by="a-real-person",
+    )
+    # 03:00 IST is outside every permitted contact window.
+    midnight = datetime(2026, 9, 4, 3, 0, tzinfo=IST)
+    verdict = gate(db_session, approved, now=midnight, write_audit=False)
+
+    checks = {c.check.value: c.passed for c in verdict.checks}
+    assert checks["value_threshold"] is True, "the approval must satisfy the check that asks for it"
+    assert checks["time_window"] is False, "and must satisfy nothing else"
+    assert verdict.passed is False, "so the send is still refused"
+
+
+def test_an_approved_send_writes_a_complete_action_row(
+    db_session: Session,
+    gate_merchant: Merchant,
+    gate_invoice: Invoice,
+    gate_consent: object,
+    monkeypatch: Any,
+) -> None:
+    """The refusal path still has to persist the action, columns and all.
+
+    ``actions`` has NOT NULL columns the runner fills in and this path originally did not, so an
+    approved send died at the insert *after* the gate had passed -- a 500 in the browser, with the
+    decision already made and nothing recorded. The gate refusing is the easy case to reach in a
+    test, and it exercises the identical insert.
+    """
+    from app.razorpay.links import LinkResult
+    from app.ui import actions as acts
+
+    class _Link:
+        short_url = "https://rzp.io/rzp/testlink"
+
+    monkeypatch.setattr(
+        acts, "create_link", lambda *a, **k: LinkResult(link=_Link(), created=True)
+    )
+    gate_invoice.recovery_state = RecoveryState.HUMAN_REVIEW.value
+    db_session.flush()
+
+    outcome = acts.approve_and_send(
+        db_session, gate_invoice.id, gate_merchant.id, actor_id="a-person"
+    )
+
+    row = db_session.execute(
+        select(Action)
+        .where(Action.invoice_id == gate_invoice.id)
+        .order_by(Action.created_at.desc())
+    ).scalars().first()
+    assert row is not None, "the decision must be recorded whichever way it went"
+    assert row.scheduled_for is not None, "NOT NULL, and the 500 this test exists for"
+    assert row.proposed_by == "human"
+
+    # Three legitimate endings, and the row has to be coherent in all of them: the gate refused,
+    # the gate passed but the transport did not deliver, or it went out.
+    if outcome.ok:
+        assert row.status == "executed"
+        assert row.executed_at is not None
+    elif row.gate_failure_reason:
+        assert row.status == "gated_fail"
+    else:
+        assert row.status == "failed", "gate passed, send did not"
+        assert row.executed_at is None, "nothing may claim an execution time it never had"
+
+
+def test_an_edited_message_still_carries_a_working_payment_link(
+    db_session: Session,
+    gate_merchant: Merchant,
+    gate_invoice: Invoice,
+    gate_consent: object,
+    monkeypatch: Any,
+) -> None:
+    """**Touching the textarea used to guarantee a refusal.**
+
+    The preview drafted against a stand-in URL, and the edit box is always submitted -- so a
+    person who opened "Review & edit" and pressed send shipped a body whose payment link did not
+    exist. Check 6 refused it every time, and the message blamed content policy, which is true and
+    completely unhelpful.
+
+    The send now rewrites the stand-in to the link it just created. A pasted body that never saw
+    a link at all is still refused, and should be.
+    """
+    from app.razorpay.links import LinkResult
+    from app.ui import actions as acts
+
+    real_url = "https://rzp.io/rzp/realone"
+
+    class _Link:
+        short_url = real_url
+
+    monkeypatch.setattr(
+        acts, "create_link", lambda *a, **k: LinkResult(link=_Link(), created=True)
+    )
+
+    # Exactly what the screen does: take the previewed body -- which holds the stand-in URL,
+    # since no link exists yet -- add a line to it, and submit that.
+    previewed = acts.preview(db_session, gate_invoice.id, gate_merchant.id)
+    assert previewed is not None
+    assert acts._placeholder_link(gate_invoice.id) in previewed.message.body
+    edited = "A quick note before the usual reminder.\n\n" + previewed.message.body
+
+    acts.approve_and_send(
+        db_session, gate_invoice.id, gate_merchant.id, actor_id="a-person", body_override=edited
+    )
+
+    row = (
+        db_session.execute(
+            select(Action)
+            .where(Action.invoice_id == gate_invoice.id)
+            .order_by(Action.created_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+    assert row is not None
+    content = [
+        v for v in row.gate_verdicts if v["check"] == "content_policy"  # type: ignore[index]
+    ]
+    assert content and content[0]["passed"] is True, (
+        "an edited body must keep a real payment link, or check 6 refuses it"
+    )
+
+
+def test_updating_a_contact_is_recorded_as_a_human_action(
+    db_session: Session, gate_merchant: Merchant, gate_invoice: Invoice
+) -> None:
+    """An invoice that closed because someone clicked a button must not read like agent recovery."""
+    from app.models.audit_log import AuditLog
+
+    outcome = actions.update_contact(
+        db_session,
+        gate_invoice.id,
+        gate_merchant.id,
+        email_address="fixed@example.co.in",
+        name="New Person",
+        actor_id="test",
+    )
+    assert outcome.ok is True
+
+    entry = db_session.execute(
+        select(AuditLog)
+        .where(AuditLog.merchant_id == gate_merchant.id, AuditLog.action_type == "contact.updated")
+        .order_by(AuditLog.id.desc())
+    ).scalars().first()
+    assert entry is not None
+    assert entry.actor == "human"
+
+
+def test_a_bad_email_is_refused_before_anything_is_written(
+    db_session: Session, gate_merchant: Merchant, gate_invoice: Invoice
+) -> None:
+    outcome = actions.update_contact(
+        db_session,
+        gate_invoice.id,
+        gate_merchant.id,
+        email_address="not-an-email",
+        name=None,
+        actor_id="test",
+    )
+    assert outcome.ok is False
+
+
+def test_a_human_action_on_another_tenants_invoice_is_absent(
+    db_session: Session, api_merchant: uuid.UUID, gate_invoice: Invoice
+) -> None:
+    """404-not-403 has to hold on the write path too, or the read-path guarantee is decorative."""
+    from app.exceptions import NotFoundError
+
+    with pytest.raises(NotFoundError):
+        actions.stop_chasing(
+            db_session, gate_invoice.id, api_merchant, reason="nope", actor_id="test"
+        )
+
+
+def test_overpaying_an_invoice_offline_is_refused(
+    db_session: Session, gate_merchant: Merchant, gate_invoice: Invoice
+) -> None:
+    """Recording more than is owed would invent recovery. The figure has to stay defensible."""
+    too_much = str(int(gate_invoice.outstanding_paise / 100) + 1000)
+    outcome = actions.mark_paid(
+        db_session,
+        gate_invoice.id,
+        gate_merchant.id,
+        amount_rupees=too_much,
+        method="neft",
+        reference=None,
+        actor_id="test",
+    )
+    assert outcome.ok is False
 
 
 # --- home ---------------------------------------------------------------------------------------
