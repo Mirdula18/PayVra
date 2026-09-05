@@ -117,6 +117,9 @@ Three server-rendered screens, at `/ui`:
 | **`/ui/audit`** | Every action proposed and what happened to it. Refusals and sends in **one list, not two tabs** — separating them would let a reader take only the flattering half. Filter chips for gate refusals, in-run refusals, approvals and executions; a chain column showing each entry hashed over its predecessor |
 | **`/ui/recovery`** | Causal and time-window figures for one run, side by side, with the divergence explained on screen |
 
+Every label, badge, status and control on those screens is explained in plain language in
+[**`payvra-docs/ui-guide.md`**](payvra-docs/ui-guide.md).
+
 ---
 
 ## How it works

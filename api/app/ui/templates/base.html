@@ -6,28 +6,31 @@
 <title>{{ title }} · PAYVRA</title>
 <style>
   :root {
-    --bg: #f6f7f9;
+    /* Razorpay-family palette: white surfaces, navy ink, a single confident blue,
+       green reserved for "this is live / this succeeded". */
+    --bg: #f7f9fc;
     --surface: #fff;
-    --surface-2: #fafbfc;
-    --line: #e4e7ec;
-    --line-2: #f0f2f5;
-    --ink: #0f1720;
-    --ink-2: #475467;
-    --ink-3: #8a94a6;
+    --surface-2: #fbfcfe;
+    --line: #e6eaf0;
+    --line-2: #f0f3f8;
+    --ink: #0a2540;
+    --ink-2: #4f5d75;
+    --ink-3: #8792a8;
 
-    --brand: #0f6b62;
-    --brand-2: #e6f2f0;
+    --brand: #2b6def;
+    --brand-hover: #1f56c9;
+    --brand-2: #ecf2fe;
 
-    --ok: #0b7a4b;      --ok-bg: #e6f5ec;
-    --warn: #b45309;    --warn-bg: #fdf3e4;
-    --stop: #b42318;    --stop-bg: #fdeceb;
-    --info: #175cd3;    --info-bg: #eaf1fd;
-    --mute-bg: #eef1f4;
+    --ok: #0f9d58;     --ok-bg: #e7f7ee;
+    --warn: #b45309;   --warn-bg: #fdf3e4;
+    --stop: #d92d20;   --stop-bg: #fdecea;
+    --info: #2b6def;   --info-bg: #ecf2fe;
+    --mute-bg: #eef1f6;
 
-    --r: 10px;
-    --shadow: 0 1px 2px rgba(16,24,40,.05);
-    --shadow-2: 0 4px 14px rgba(16,24,40,.08);
-    --sidebar: 224px;
+    --r: 12px;
+    --shadow: 0 1px 2px rgba(10,37,64,.06);
+    --shadow-2: 0 6px 20px rgba(10,37,64,.10);
+    --sidebar: 232px;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -46,13 +49,13 @@
   }
   .logo { padding: 18px 18px 14px; display: flex; align-items: center; gap: 9px; }
   .logo .mark {
-    width: 26px; height: 26px; border-radius: 7px; background: var(--brand); color: #fff;
+    width: 27px; height: 27px; border-radius: 8px; background: var(--brand); color: #fff;
     display: grid; place-items: center; font-weight: 800; font-size: 13px; letter-spacing: -.02em;
   }
   .logo .name { font-weight: 700; letter-spacing: -.01em; font-size: 15px; }
   .logo .env {
     margin-left: auto; font-size: 9px; font-weight: 700; letter-spacing: .08em;
-    color: var(--ink-3); border: 1px solid var(--line); padding: 2px 5px; border-radius: 4px;
+    color: #fff; background: var(--ink); padding: 3px 7px; border-radius: 20px;
   }
   .side nav { padding: 6px 10px; display: flex; flex-direction: column; gap: 1px; overflow-y: auto; }
   .side .grp {
@@ -64,7 +67,9 @@
     color: var(--ink-2); font-weight: 500; font-size: 13.5px;
   }
   .side nav a:hover { background: var(--surface-2); color: var(--ink); }
-  .side nav a.on { background: var(--brand-2); color: var(--brand); font-weight: 600; }
+  .side nav a.on { background: var(--brand-2); color: var(--brand); font-weight: 650; }
+  .side nav a.on::before { content: ''; position: absolute; left: 0; width: 3px; height: 18px; border-radius: 0 3px 3px 0; background: var(--ok); }
+  .side nav a { position: relative; }
   .side nav a svg { width: 16px; height: 16px; flex: none; stroke-width: 1.9; }
   .side nav a .badge {
     margin-left: auto; font-size: 11px; font-weight: 700; color: var(--ink-3);
@@ -172,8 +177,8 @@
     background: var(--surface); box-shadow: var(--shadow); white-space: nowrap;
   }
   .btn:hover { background: var(--surface-2); }
-  .btn-p { background: var(--brand); border-color: var(--brand); color: #fff; }
-  .btn-p:hover { background: #0c5a52; }
+  .btn-p { background: var(--brand); border-color: var(--brand); color: #fff; box-shadow: 0 1px 2px rgba(43,109,239,.28); }
+  .btn-p:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
   .btn-sm { padding: 4px 9px; font-size: 12px; }
   .btn svg { width: 14px; height: 14px; }
 
@@ -182,7 +187,7 @@
   .seg a {
     padding: 4px 10px; border-radius: 6px; font-size: 12.5px; font-weight: 600; color: var(--ink-2);
   }
-  .seg a.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+  .seg a.on { background: var(--surface); color: var(--brand); box-shadow: var(--shadow); }
 
   /* bars & charts */
   .bar { height: 7px; border-radius: 99px; background: var(--line-2); overflow: hidden; }
@@ -268,6 +273,11 @@
     </div>
     <nav>
       <div class="grp">Recover</div>
+      <a href="/ui/demo" class="{{ 'on' if active == 'demo' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg>
+        Demo Mode
+        <span class="badge" style="background:var(--ink);color:#fff">NEW</span>
+      </a>
       <a href="/ui/home" class="{{ 'on' if active == 'home' }}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>
         Overview
