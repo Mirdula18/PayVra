@@ -68,6 +68,10 @@ class SettleSource:
 
     WEBHOOK = "webhook"
     MANUAL = "manual"
+    #: Learned by asking Razorpay rather than by being told. Distinct from WEBHOOK on purpose:
+    #: a reader should be able to see that this settlement was found by a poll, which usually
+    #: means a webhook was missed.
+    POLL = "poll"
 
 
 @dataclass
